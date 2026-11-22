@@ -17,6 +17,7 @@ There is no "probably" verdict.
 - **Concrete interpreter** — detects out-of-bounds reads/writes, null and dangling pointer dereference, double/invalid free, signed overflow, bad shifts, divide-by-zero, writes to const data, uninitialized reads, and array overflow inside a struct field (`field_oob`, distinct from whole-object `oob`).
 - **Taint-guided concolic + symbolic engine** — SMT-backed exploration (`lib/smt`) driven by which bytes an attacker controls: branches are flipped where taint reaches a check, not everywhere.
 - **Replay confirmation** — each `bug` finding is replayed on the concrete interpreter before it is reported.
+- **Backward weakest-precondition analysis (experimental)** — `hlir-wp-probe` enumerates every safety check in a linked `core` module, independent of forward coverage, and walks SSA def chains backwards from each check's operands to find the variables its violation condition depends on. With `--solve` it builds that violation condition as an SMT term over fresh unconstrained roots; an UNSAT result proves the site safe on every path, which prunes it from the forward search. It does not yet model loops or aliasing, and path guards are not yet included, so SAT results are only candidates.
 - **Bounded verdicts** — loop-bounded unrolling with iterative deepening (`safe_up_to_loop_bound`), frontier/step/memory budgets, minimum-coverage gates, and branch-direction coverage in every report.
 
 ### Scanning real code
@@ -45,7 +46,8 @@ Hand-written, explorable models (not opaque stubs) in `models/`:
 | `hlir-run` | Concrete interpreter |
 | `hlir-opt` | IR verifier and coverage reports |
 | `hlirgen` | C/C++ source to `core` |
-| `hlir-invariant`, `hlir-wp-probe` | Loop-invariant checking and backward weakest-precondition experiments |
+| `hlir-wp-probe` | Backward weakest-precondition probe: slice size per check, optional SMT safety proofs (`--solve`) |
+| `hlir-invariant` | Loop-invariant checking |
 
 ## Build and test
 
