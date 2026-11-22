@@ -1,0 +1,112 @@
+# ModelDB for functions without a body (hlir/model/Model.h). Bodies written in `core` (models/libc.core) take precedence;
+# these models describe calls to functions that are only declared.
+models:
+  # ssize_t recv(int fd, void *buf, size_t len, int flags): up to len attacker-controlled bytes, the count is attacker controlled too
+  - function: recv
+    returns: { nondet: { min: -1, max: arg2, default: arg2, tainted: network } }
+    source: [ { label: network, ptr: arg1, size: ret } ]
+
+  # ssize_t read(int fd, void *buf, size_t count)
+  - function: read
+    returns: { nondet: { min: -1, max: arg2, default: arg2, tainted: file } }
+    source: [ { label: file, ptr: arg1, size: ret } ]
+
+  # int getc(FILE *fp) / int fgetc(FILE *fp): a tainted attacker-controlled byte 0..255, or EOF (-1). No buffer
+  # involved (scalar return only) -- this is what lets a zero-parameter, FILE*-driven entry (e.g. a CLI tool's
+  # `while ((c = getc(fp)) != X)` parsing loop, no caller-supplied buffer/length parameter at all) get a live taint
+  # source from a call inside the function body with `--include-noarg`, instead of being vacuously unexplorable.
+  # See docs/DESIGN.md's CVE-2016-3186/gif2tiff ground-truth write-up for the diagnosis this model fixes.
+  - function: getc
+    returns: { nondet: { min: -1, max: 255, default: -1, tainted: file } }
+  - function: fgetc
+    returns: { nondet: { min: -1, max: 255, default: -1, tainted: file } }
+
+  # char *getenv(const char *name): a NUL-terminated string of at most 63 attacker-controlled bytes, or NULL
+  - function: getenv
+    returns: { alloc: { size: 64, zeroed: true, may_fail: true } }
+    source: [ { label: env, ptr: ret, size: 63 } ]
+
+  # int atoi(const char *s): opaque number derived from the string
+  - function: atoi
+    flow: [ { from: arg0_pointee, to: ret, size: "strlen(arg0)+1" } ]
+
+  # size_t strlen(const char *s)
+  - function: strlen
+    returns: { strlen: 0 }
+    flow: [ { from: arg0_pointee, to: ret, size: "strlen(arg0)+1" } ]
+
+  # char *strcpy(char *dst, const char *src): copies the bytes (values and taint) including the terminator
+  - function: strcpy
+    copy: [ { dst: arg0, src: arg1, size: "strlen(arg1)+1" } ]
+    returns: { arg: 0 }
+
+  # void *memcpy / memmove / memset for modules that only declare them
+  - function: memcpy
+    copy: [ { dst: arg0, src: arg1, size: arg2 } ]
+    returns: { arg: 0 }
+  - function: memmove
+    copy: [ { dst: arg0, src: arg1, size: arg2 } ]
+    returns: { arg: 0 }
+  - function: memset
+    fill: [ { ptr: arg0, value: arg1, size: arg2 } ]
+    returns: { arg: 0 }
+
+  # void arc4random_buf(void *buf, size_t nbytes): a CSPRNG that always fills every one of `nbytes` bytes (it
+  # cannot fail/partially fill, unlike read()/recv()). Without a model it was "opaque, no effect on memory"
+  # (Model.h's default for unlisted externals), so code relying on it to initialise a buffer (e.g. expat's
+  # generate_hash_secret_salt) saw a spurious uninit_read: the real function always writes, this just didn't
+  # say so. The bytes are not attacker-controlled (it is explicitly a non-attacker entropy source), so this
+  # marks the buffer initialised via `fill` rather than `source` with a taint label - a label would make
+  # downstream security-sensitive uses of the "random" value (hash seeds, nonces) look attacker-tainted, which
+  # is the wrong direction to be unsound in for a CSPRNG's output.
+  - function: arc4random_buf
+    fill: [ { ptr: arg0, value: 0, size: arg1 } ]
+
+  # int getentropy(void *buf, size_t len) / ssize_t getrandom(void *buf, size_t len, unsigned flags): the same
+  # argument as arc4random_buf above, for the two kernel entropy calls. libgit2 seeds its hashtables through
+  # getentropy (git_rand_global_init), and left unmodelled the seed buffer stays UNINITIALISED -- every later
+  # read of it is a uninit_read the program cannot actually produce. `fill` rather than `source`: a CSPRNG's
+  # output is not attacker data, and labelling it would make every hash seed downstream look tainted.
+  # getentropy fills all `len` bytes or fails wholesale; getrandom can short-read, but modelling the full
+  # fill is the direction that does not invent uninitialised bytes.
+  - function: getentropy
+    fill: [ { ptr: arg0, value: 0, size: arg1 } ]
+  - function: getrandom
+    fill: [ { ptr: arg0, value: 0, size: arg1 } ]
+
+  # sinks: attacker-controlled data reaching them is a finding
+  - function: system
+    sink: [ { kind: command_exec, arg: arg0_pointee } ]
+  - function: popen
+    sink: [ { kind: command_exec, arg: arg0_pointee } ]
+  - function: printf
+    sink: [ { kind: format_string, arg: arg0_pointee } ]
+
+  # helper for the core model of fgets: n attacker-controlled bytes from a file
+  - function: __hlir_fill_file
+    source: [ { label: file, ptr: arg0, size: arg1 } ]
+
+  # off_t lseek(int fd, off_t off, int whence): the new offset or -1
+  - function: lseek
+    returns: { nondet: { min: -1, max: 2147483647, default: 0 } }
+
+  # helper for the core model of recvmsg: n attacker-controlled bytes from the network
+  - function: __hlir_fill_network
+    source: [ { label: network, ptr: arg0, size: arg1 } ]
+
+  # struct wl_list *wl_resource_get_link(struct wl_resource *resource) / struct wl_resource *wl_resource_from_link(struct wl_list *link)
+  # (libwayland-server, declared only -- the real body lives in libwayland's own .c, not in the analysed module). The
+  # two are exact inverses: pure pointer reinterpretation (container_of / &res->link), no memory access either way.
+  # Opaque's default ("NULL or an unrelated fresh object") breaks that round trip, and every `wl_resource_for_each`/
+  # `_safe` loop (wayland-server-core.h) tests `wl_resource_get_link(wl_resource_from_link(x)->next) != list` to find
+  # the end: on a real, empty list the round trip gives back `list` itself and the loop body never runs, but with the
+  # round trip broken the comparison is never true, and the "loop" just keeps synthesizing new opaque objects until it
+  # hits the step limit (reported honestly as incomplete:step_limit, not a wrong verdict, but still a tool-side
+  # artifact, not a real hang in the real program). Modelling both as the identity function (returning the single
+  # argument unchanged) restores the round trip for any list, empty or not, without hardcoding wl_resource's private
+  # layout (its `link` field's real byte offset, which is libwayland-version-specific and not meant to be depended on
+  # outside libwayland itself).
+  - function: wl_resource_get_link
+    returns: { arg: 0 }
+  - function: wl_resource_from_link
+    returns: { arg: 0 }

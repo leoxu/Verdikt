@@ -1,0 +1,26 @@
+version: 1
+structs:
+  - struct: sb
+    size: 32
+    fields:
+      - name: blk
+        offset: 8
+        bits: 64
+        enum: [9, 10, 11]
+        why: "test fixture: the mount path restricts it, exactly as fs/isofs/inode.c:746 does"
+  - struct: sb2
+    size: 16
+    pointers:
+      - name: fs_info
+        offset: 8
+        struct: priv
+        size: 8
+        why: "test fixture: the cast in sr_void is the only statement of this type, exactly as ISOFS_SB(sb) is"
+  - struct: priv
+    size: 8
+    fields:
+      - name: zone
+        offset: 0
+        bits: 64
+        enum: [9, 10, 11]
+        why: "test fixture: the mount path restricts it"

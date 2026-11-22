@@ -1,0 +1,13 @@
+// EXPECT: none
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.alloca {size=4, align=4} : ptr
+  %b = core.trunc %x : i8
+  core.store %b, %p
+  %z = core.const 0 : i32
+  core.store %z, %p
+  core.check.uninit %p {w=4}
+  %v = core.load %p : i32
+  core.return %v
+}

@@ -1,0 +1,5 @@
+// ERROR: reference to undefined block ^nowhere
+core.func @f() -> void {
+^entry:
+  core.br ^nowhere
+}

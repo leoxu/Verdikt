@@ -1,0 +1,5 @@
+skip:
+  - function: ext_log
+    reason: logging; writes nothing the caller owns and returns nothing
+  - function: ext_never_declared_anywhere
+    reason: copied from another project on purpose, to prove a stale claim is reported

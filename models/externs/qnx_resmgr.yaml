@@ -1,0 +1,28 @@
+# The externals a QNX resource manager calls, and what this project claims about them
+# (`hlir-scan --externs models/externs/qnx_resmgr.yaml`, DESIGN.md §22.379).
+#
+# This is a STARTING POINT, not a finished statement. The skip list below covers what the dry run on <driver>
+# actually hit; a different module will hit different functions, and each one has to be looked at before it is
+# added here. A skip is a claim about the program -- "this function contributes nothing to the state the entries
+# read" -- so if one of them does write a buffer an entry later reads, every check of that buffer in the whole
+# scan is decided on a state the program never has. The report prints these as decisions, with their reasons,
+# precisely so that a wrong one is visible rather than buried among the externals nobody has examined yet.
+#
+# Use it together with `--qnx`, which loads models/qnx.core and models/qnx.yaml. Naming qnx.yaml here as well is
+# harmless (a later document simply overrides an earlier one), and is how a project that does NOT pass `--qnx`
+# would pick the models up.
+models:
+  - ../qnx.yaml
+
+skip:
+  # --- the attribute mutex. These DO write, but only into the `lock` union at offset 32 of iofunc_attr_t, which
+  #     is the library's own synchronisation state: nothing in this tree reads it, and no bounds, index or length
+  #     in a handler is derived from it. Their RESULT is deliberately left opaque rather than pinned to EOK, so a
+  #     handler that checks for a lock failure still has that edge explored.
+  #
+  #     This is the entry in this file most worth re-reading if a verdict looks too clean: it is the only skip
+  #     here that touches caller memory at all.
+  - function: iofunc_attr_lock
+    reason: writes only the library's mutex word inside iofunc_attr_t; no handler reads it, and the result stays opaque
+  - function: iofunc_attr_unlock
+    reason: writes only the library's mutex word inside iofunc_attr_t; no handler reads it, and the result stays opaque

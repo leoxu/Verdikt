@@ -1,0 +1,5 @@
+// ERROR: do not match the function signature
+core.func @f(i32) -> void {
+^entry(%a: i64):
+  core.return
+}

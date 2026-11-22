@@ -1,0 +1,11 @@
+// A block may be written before the block that dominates it; values are resolved after the whole function is read.
+core.func @fwd(i32) -> i32 {
+^entry(%a: i32):
+  core.br ^def
+^use:
+  %r = core.add %a, %late : i32
+  core.return %r
+^def:
+  %late = core.const 1 : i32
+  core.br ^use
+}

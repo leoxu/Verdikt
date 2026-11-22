@@ -1,0 +1,7 @@
+# The plain constructor: the handler's own defect must survive it.
+taint_entries:
+  - function: demo_sc_ioctl_oob
+    setup: { function: demo_sc_open, session_param: s, ctor_param: s, success: "ret == 0" }
+    params:
+      s:   { taint: none, kind: buffer, size: { min: 16, max: 16 } }
+      arg: { taint: value, type: uint64_t }

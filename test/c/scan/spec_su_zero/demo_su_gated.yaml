@@ -1,0 +1,7 @@
+taint_entries:
+  - function: demo_su_gated
+    label: su
+    params:
+      s: { taint: none, kind: buffer, size: { min: 8, max: 8 } }
+      msg: { taint: pointee, kind: buffer, size: { min: 1, max: 4 } }
+      n: { taint: value, type: int }

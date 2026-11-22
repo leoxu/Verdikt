@@ -1,0 +1,252 @@
+// DESIGN.md §19.9 example 2 and friends: symbolic memory (pointers are (obj, off); heap size/liveness are SMT terms).
+
+// if (flag) free(p); ... free(p);  => double free exactly when flag != 0
+core.func @cond_double_free(i32) -> i32 {
+^entry(%flag: i32):
+  %n = core.const 16 : i64
+  %p = core.heap_alloc %n {fail=nondet} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^fail, ^ok
+^fail:
+  %m1 = core.const -1 : i32
+  core.return %m1
+^ok:
+  %z = core.const 0 : i32
+  %f = core.icmp ne %flag, %z : bool
+  core.cond_br %f, ^free1, ^join
+^free1:
+  core.check.free %p {expect=heap, origin="hl.call @free"} loc("x.c":12:5)
+  core.free %p
+  core.br ^join
+^join:
+  core.check.free %p {expect=heap, origin="hl.call @free"} loc("x.c":14:3)
+  core.free %p
+  core.return %z
+}
+
+// buf = malloc(len); buf[len - 1] = 0;   with len >= 0 assumed: len == 0 writes before the buffer
+core.func @last_byte(i32) -> i32 {
+^entry(%len: i32):
+  %z = core.const 0 : i32
+  %nonneg = core.icmp sge %len, %z : bool
+  core.assume %nonneg
+  %n = core.sext %len : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  %one = core.const 1 : i64
+  %off = core.sub %n, %one : i64
+  core.check.ptr_arith %p, %off {origin="hl.subscript"} loc("x.c":15:5)
+  %q = core.ptr_add %p, %off : ptr
+  core.check.null %q
+  core.check.uaf %q
+  core.check.oob %q {w=1, access="w"} loc("x.c":15:5)
+  %b = core.const 0 : i8
+  core.store %b, %q
+  core.return %z
+}
+
+// store/load roundtrip of a symbolic value through the byte-level memory
+core.func @roundtrip(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.alloca {size=4, align=4} : ptr
+  core.store %x, %p
+  core.check.uninit %p {w=4}
+  %v = core.load %p : i32
+  core.return %v
+}
+
+// a pointer chosen by a symbolic condition: the load is guarded over both candidate objects
+core.func @select_ptr(i32) -> i32 {
+^entry(%x: i32):
+  %a = core.alloca {size=4, align=4} : ptr
+  %b = core.alloca {size=4, align=4} : ptr
+  %ten = core.const 10 : i32
+  %twenty = core.const 20 : i32
+  core.store %ten, %a
+  core.store %twenty, %b
+  %z = core.const 0 : i32
+  %c = core.icmp ne %x, %z : bool
+  %p = core.select %c, %a, %b : ptr
+  %v = core.load %p : i32
+  core.return %v
+}
+
+// core.ptr_to_int of a pointer whose `obj` is itself symbolic (merged across two objects by a select)
+core.func @ptr_to_int_select(i32) -> i64 {
+^entry(%x: i32):
+  %a = core.alloca {size=4, align=4} : ptr
+  %b = core.alloca {size=4, align=4} : ptr
+  %z = core.const 0 : i32
+  %c = core.icmp ne %x, %z : bool
+  %p = core.select %c, %a, %b : ptr
+  %i = core.ptr_to_int %p : i64
+  core.return %i
+}
+
+// int buf[8]-style array of bytes indexed by an unchecked symbolic index
+core.func @index_write(i32) -> i32 {
+^entry(%i: i32):
+  %buf = core.alloca {size=8} : ptr
+  %idx = core.zext %i : i64
+  %q = core.ptr_add %buf, %idx : ptr
+  core.check.oob %q {w=1, access="w"} loc("a.c":6:5)
+  %one = core.const 1 : i8
+  core.store %one, %q
+  %v = core.load %buf : i8
+  %r = core.zext %v : i32
+  core.return %r
+}
+
+// heap object with a symbolic size, read at constant offset 16
+core.func @sized_read(i64) -> i32 {
+^entry(%n: i64):
+  %p = core.heap_alloc %n {fail=never} : ptr
+  %o = core.const 16 : i64
+  %q = core.ptr_add %p, %o : ptr
+  core.check.oob %q {w=1, access="r"} loc("s.c":4:9)
+  %v = core.load %q : i8
+  %r = core.zext %v : i32
+  core.return %r
+}
+
+// malloc'd memory is uninitialised until written
+core.func @uninit_heap(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 8 : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  core.store %x, %p
+  core.check.uninit %p {w=4}
+  %four = core.const 4 : i64
+  %q = core.ptr_add %p, %four : ptr
+  core.check.uninit %q {w=4} loc("u.c":9:3)
+  %v = core.load %q : i32
+  core.return %v
+}
+
+// pointer stored in memory, loaded back and used after the pointee was freed
+core.func @uaf_via_slot(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 4 : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  %slot = core.alloca {size=8, align=8} : ptr
+  core.store %p, %slot
+  core.store %x, %p
+  core.free %p
+  %q = core.load %slot : ptr
+  core.check.null %q
+  core.check.uaf %q loc("p.c":8:3)
+  %v = core.load %q : i32
+  core.return %v
+}
+
+// ---- array memory: symbolic offsets (DESIGN.md §19.5 P2)
+
+// store at buf[i & 7], read it back at the same symbolic offset: always the stored byte, never uninitialised
+core.func @sym_roundtrip(i32, i8) -> i8 {
+^entry(%i: i32, %v: i8):
+  %buf = core.alloca {size=8} : ptr
+  %m = core.const 7 : i32
+  %k = core.and %i, %m : i32
+  %idx = core.zext %k : i64
+  %q = core.ptr_add %buf, %idx : ptr
+  core.check.oob %q {w=1, access="w"}
+  core.store %v, %q
+  core.check.uninit %q {w=1} loc("a.c":4:3)
+  core.check.oob %q {w=1, access="r"}
+  %r = core.load %q : i8
+  core.return %r
+}
+
+// the byte at buf[0] is only initialised if the symbolic store happened to hit offset 0
+core.func @sym_partial_init(i32, i8) -> i8 {
+^entry(%i: i32, %v: i8):
+  %buf = core.alloca {size=8} : ptr
+  %m = core.const 7 : i32
+  %k = core.and %i, %m : i32
+  %idx = core.zext %k : i64
+  %q = core.ptr_add %buf, %idx : ptr
+  core.store %v, %q
+  core.check.uninit %buf {w=1} loc("a.c":9:3)
+  %r = core.load %buf : i8
+  core.return %r
+}
+
+// zero-initialised global, symbolic store, symbolic load at another offset
+core.func @sym_two_offsets(i32, i32, i8) -> i8 {
+^entry(%i: i32, %j: i32, %v: i8):
+  %g = core.global_addr @tbl {size=16} : ptr
+  %m = core.const 15 : i32
+  %a = core.and %i, %m : i32
+  %b = core.and %j, %m : i32
+  %ia = core.zext %a : i64
+  %ib = core.zext %b : i64
+  %pa = core.ptr_add %g, %ia : ptr
+  %pb = core.ptr_add %g, %ib : ptr
+  core.store %v, %pa
+  %r = core.load %pb : i8
+  core.return %r
+}
+
+// memcpy with a symbolic length n <= 16: bytes below n are copied, the rest keep their value
+core.func @sym_memcpy(i64, i8) -> i8 {
+^entry(%n: i64, %v: i8):
+  %sixteen = core.const 16 : i64
+  %ok = core.icmp ule %n, %sixteen : bool
+  core.assume %ok
+  %src = core.alloca {size=16} : ptr
+  %dst = core.alloca {size=16} : ptr
+  %z = core.const 0 : i8
+  core.memset %src, %v, %sixteen
+  core.memset %dst, %z, %sixteen
+  core.memcpy %dst, %src, %n
+  %five = core.const 5 : i64
+  %q = core.ptr_add %dst, %five : ptr
+  %r = core.load %q : i8
+  core.return %r
+}
+
+// the same without the bound: the unrolling bound is not enough and the engine says so
+core.func @sym_memcpy_unbounded(i64) -> i32 {
+^entry(%n: i64):
+  %src = core.alloca {size=16} : ptr
+  %dst = core.alloca {size=16} : ptr
+  %z = core.const 0 : i8
+  %sixteen = core.const 16 : i64
+  core.memset %src, %z, %sixteen
+  core.memset %dst, %z, %sixteen
+  core.memcpy %dst, %src, %n
+  %r = core.const 0 : i32
+  core.return %r
+}
+
+// pointers stored at symbolic slots keep their provenance (slots[i&1] = a or b)
+core.func @sym_ptr_slots(i32, i32) -> i32 {
+^entry(%i: i32, %j: i32):
+  %a = core.alloca {size=4, align=4} : ptr
+  %b = core.alloca {size=4, align=4} : ptr
+  %ten = core.const 10 : i32
+  %twenty = core.const 20 : i32
+  core.store %ten, %a
+  core.store %twenty, %b
+  %slots = core.alloca {size=16, align=8} : ptr
+  %one = core.const 1 : i32
+  %si = core.and %i, %one : i32
+  %sj = core.and %j, %one : i32
+  %oi = core.zext %si : i64
+  %oj = core.zext %sj : i64
+  %eight = core.const 8 : i64
+  %bi = core.mul %oi, %eight : i64
+  %bj = core.mul %oj, %eight : i64
+  %pi = core.ptr_add %slots, %bi : ptr
+  %pj = core.ptr_add %slots, %bj : ptr
+  %slot0 = core.ptr_add %slots, %bi : ptr
+  core.store %a, %pi
+  %other = core.sub %eight, %bi : i64
+  %po = core.ptr_add %slots, %other : ptr
+  core.store %b, %po
+  %q = core.load %pj : ptr
+  core.check.null %q
+  core.check.uaf %q
+  core.check.oob %q {w=4, access="r"}
+  %v = core.load %q : i32
+  core.return %v
+}

@@ -1,0 +1,25 @@
+// FLAGS: coverage
+// DESIGN.md §18.8 S1: heap object lifetime
+core.func @f(i32) -> i32 {
+^entry(%len: i32):
+  %c0 = core.const 0 : i32
+  %cm1 = core.const -1 : i32
+  %neg = core.icmp slt %len, %c0 : bool
+  core.cond_br %neg, ^ret_neg, ^alloc
+^ret_neg:
+  core.return %cm1
+^alloc:
+  %n64 = core.sext %len : i64 loc("net.c":7:22)
+  %p = core.heap_alloc %n64 {fail=nondet} : ptr loc("net.c":8:14)
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^ret_null, ^free
+^ret_null:
+  %cm2 = core.const -2 : i32
+  core.return %cm2
+^free:
+  core.check.null %p
+  core.check.uaf %p
+  core.check.free %p {expect=heap, origin="hl.call @free"}
+  core.free %p
+  core.return %c0
+}

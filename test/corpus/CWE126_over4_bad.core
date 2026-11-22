@@ -1,0 +1,15 @@
+// EXPECT: oob_read
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %buf = core.alloca {size=4} : ptr
+  %zero = core.const 0 : i8
+  %n = core.const 4 : i64
+  core.memset %buf, %zero, %n
+  %i = core.const 4 : i64
+  %q = core.ptr_add %buf, %i : ptr
+  core.check.oob %q {w=1, access="r"}
+  %v = core.load %q : i8
+  %r = core.zext %v : i32
+  core.return %r
+}

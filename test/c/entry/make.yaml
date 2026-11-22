@@ -1,0 +1,5 @@
+taint_entries:
+  - function: make
+    label: network
+    params:
+      count: { taint: value, type: int }

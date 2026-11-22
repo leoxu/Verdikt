@@ -1,0 +1,7 @@
+// ERROR: terminator in the middle of a block
+core.func @f() -> void {
+^entry:
+  core.return
+  %a = core.const 1 : i32
+  core.return
+}

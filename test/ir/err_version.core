@@ -1,0 +1,6 @@
+// ERROR: unsupported core text version
+// core.version 9
+core.func @f() -> void {
+^entry:
+  core.return
+}

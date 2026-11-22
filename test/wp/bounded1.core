@@ -1,0 +1,57 @@
+// linked from: /tmp/scratch/bounded1.c
+core.func @bounded1(i32) -> i32 {
+^entry(%i: i32):
+  %v0 = core.alloca {size=4, align=4, name="i"} : ptr loc("/tmp/scratch/bounded1.c":1:5)
+  core.store %i, %v0 {waived="object known"} loc("/tmp/scratch/bounded1.c":1:5)
+  %v1 = core.alloca {size=40, align=4, name="a"} : ptr loc("/tmp/scratch/bounded1.c":2:9)
+  core.check.uninit %v0 {w=4} loc("/tmp/scratch/bounded1.c":3:9)
+  %l2 = core.load %v0 {waived="object known"} : i32 loc("/tmp/scratch/bounded1.c":3:9)
+  %c3 = core.const 10 : i32 loc("/tmp/scratch/bounded1.c":3:13)
+  %t4 = core.icmp ult %l2, %c3 : bool loc("/tmp/scratch/bounded1.c":3:13)
+  core.cond_br %t4, ^then1, ^endif2 loc("/tmp/scratch/bounded1.c":3:13)
+^then1:
+  core.check.uninit %v0 {w=4} loc("/tmp/scratch/bounded1.c":3:26)
+  %l5 = core.load %v0 {waived="object known"} : i32 loc("/tmp/scratch/bounded1.c":3:26)
+  %t6 = core.zext %l5 : i64 loc("/tmp/scratch/bounded1.c":3:26)
+  %c7 = core.const 4 : i64 loc("/tmp/scratch/bounded1.c":3:26)
+  %t8 = core.mul %t6, %c7 : i64 loc("/tmp/scratch/bounded1.c":3:26)
+  core.check.ptr_arith %v1, %t8 loc("/tmp/scratch/bounded1.c":3:26)
+  %p9 = core.ptr_add %v1, %t8 : ptr loc("/tmp/scratch/bounded1.c":3:26)
+  core.check.null %p9 loc("/tmp/scratch/bounded1.c":3:26)
+  core.check.uaf %p9 loc("/tmp/scratch/bounded1.c":3:26)
+  core.check.oob %p9 {w=4, access="r"} loc("/tmp/scratch/bounded1.c":3:26)
+  core.check.uninit %p9 {w=4} loc("/tmp/scratch/bounded1.c":3:26)
+  %l10 = core.load %p9 : i32 loc("/tmp/scratch/bounded1.c":3:26)
+  core.return %l10 loc("/tmp/scratch/bounded1.c":3:26)
+^endif2:
+  %c11 = core.const -1 : i32 loc("/tmp/scratch/bounded1.c":4:12)
+  core.return %c11 loc("/tmp/scratch/bounded1.c":4:12)
+}
+core.func @bad1(i32) -> i32 {
+^entry(%i: i32):
+  %v0 = core.alloca {size=4, align=4, name="i"} : ptr loc("/tmp/scratch/bounded1.c":6:5)
+  core.store %i, %v0 {waived="object known"} loc("/tmp/scratch/bounded1.c":6:5)
+  %v1 = core.alloca {size=40, align=4, name="a"} : ptr loc("/tmp/scratch/bounded1.c":7:9)
+  core.check.uninit %v0 {w=4} loc("/tmp/scratch/bounded1.c":8:9)
+  %l2 = core.load %v0 {waived="object known"} : i32 loc("/tmp/scratch/bounded1.c":8:9)
+  %c3 = core.const 20 : i32 loc("/tmp/scratch/bounded1.c":8:13)
+  %t4 = core.icmp ult %l2, %c3 : bool loc("/tmp/scratch/bounded1.c":8:13)
+  core.cond_br %t4, ^then1, ^endif2 loc("/tmp/scratch/bounded1.c":8:13)
+^then1:
+  core.check.uninit %v0 {w=4} loc("/tmp/scratch/bounded1.c":8:26)
+  %l5 = core.load %v0 {waived="object known"} : i32 loc("/tmp/scratch/bounded1.c":8:26)
+  %t6 = core.zext %l5 : i64 loc("/tmp/scratch/bounded1.c":8:26)
+  %c7 = core.const 4 : i64 loc("/tmp/scratch/bounded1.c":8:26)
+  %t8 = core.mul %t6, %c7 : i64 loc("/tmp/scratch/bounded1.c":8:26)
+  core.check.ptr_arith %v1, %t8 loc("/tmp/scratch/bounded1.c":8:26)
+  %p9 = core.ptr_add %v1, %t8 : ptr loc("/tmp/scratch/bounded1.c":8:26)
+  core.check.null %p9 loc("/tmp/scratch/bounded1.c":8:26)
+  core.check.uaf %p9 loc("/tmp/scratch/bounded1.c":8:26)
+  core.check.oob %p9 {w=4, access="r"} loc("/tmp/scratch/bounded1.c":8:26)
+  core.check.uninit %p9 {w=4} loc("/tmp/scratch/bounded1.c":8:26)
+  %l10 = core.load %p9 : i32 loc("/tmp/scratch/bounded1.c":8:26)
+  core.return %l10 loc("/tmp/scratch/bounded1.c":8:26)
+^endif2:
+  %c11 = core.const -1 : i32 loc("/tmp/scratch/bounded1.c":9:12)
+  core.return %c11 loc("/tmp/scratch/bounded1.c":9:12)
+}

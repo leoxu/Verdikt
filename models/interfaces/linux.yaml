@@ -1,0 +1,157 @@
+# Call-contract models for the Linux kernel's well-known dispatch interfaces (DESIGN.md §22.357).
+#
+# These are NOT behaviour models -- `models/*.core` says what a FUNCTION does; this file says what a HANDLER is
+# handed. The two layers are deliberately separate: a `.core` model replaces a body, an interface model replaces the
+# generic parameter synthesis with the contract the interface actually guarantees.
+#
+# Everything here that NARROWS the state (a success assumption, "this object is kernel-owned, not attacker data")
+# is turned into a named entry in the report's `assumptions`, the same discipline as `same_alloc` and `where`.
+#
+# Roles (closed vocabulary):
+#   session      the object the ctor slot created; synthesised by CALLING that slot, never field-by-field
+#   session_out  the ctor slot's output parameter
+#   kernel_owned constructed by the kernel before the handler runs: taint none, constructor invariants assumed
+#   user_addr    a userspace address. Passing it on is fine; DEREFERENCING it directly is a finding. Its bytes are
+#                attacker-controlled and reach the callee only through the copy_from_user/copy_to_user models.
+#   value        attacker-controlled data: the value of a scalar, or the CONTENTS of a legal kernel-side object a
+#                pointer points at (a dispatcher that already did the copy_from_user for its handlers). Unlike
+#                user_addr, the pointer itself is a valid kernel address.
+#   out          written by the callee (so reading it uninitialised is the callee's business, not a finding)
+
+version: 1
+
+interfaces:
+  - interface: file_operations
+    struct: file_operations
+    label: untrusted
+    # `module_init` is what WOULD have to run before any slot for the globals a handler reads to be the ones the
+    # module really set rather than their static initialisers (usually zero) -- a state no handler is ever called in.
+    #
+    # IT IS NOT RUN. This line records the fact and nothing more: the entries of this interface carry an assumption
+    # saying the prologue was declared and not executed, next to G1's `global_initial_value` assumption (§22.362)
+    # which names the individual branches that initial value decided on its own. Executing it is designed in
+    # DESIGN.md §22.368 and not implemented. An earlier comment here claimed budget accounting and a
+    # "dropped when it does not pay for itself" heuristic; neither exists.
+    prologue: [ module_init ]
+    session:
+      param: file
+      created_by: open
+      released_by: release
+      handle: file.private_data
+    slots:
+      open:
+        params:
+          inode: { role: kernel_owned }
+          file:  { role: session_out }
+        success: "ret == 0"
+      release:
+        params:
+          inode: { role: kernel_owned }
+          file:  { role: session }
+      read:
+        params:
+          file:  { role: session }
+          buf:   { role: user_addr, dir: out, size_from: count }
+          count: { role: value }
+          ppos:  { role: kernel_owned, dir: inout }
+      write:
+        params:
+          file:  { role: session }
+          buf:   { role: user_addr, dir: in, size_from: count }
+          count: { role: value }
+          ppos:  { role: kernel_owned, dir: inout }
+      unlocked_ioctl:
+        params:
+          file: { role: session }
+          cmd:  { role: value }
+          arg:  { role: user_addr }
+      compat_ioctl:
+        params:
+          file: { role: session }
+          cmd:  { role: value }
+          arg:  { role: user_addr }
+      poll:
+        params:
+          file: { role: session }
+          wait: { role: kernel_owned }
+      mmap:
+        params:
+          file: { role: session }
+          vma:  { role: kernel_owned }
+      llseek:
+        params:
+          file:   { role: session }
+          offset: { role: value }
+          whence: { role: value }
+      # int (*fasync)(int fd, struct file *file, int on): reached from userspace with fcntl(F_SETFL, O_ASYNC).
+      # `fd` is the descriptor number the caller chose and `on` the flag it set -- both the attacker's, both just
+      # integers. Listed because it IS an entry point; `read_iter`/`write_iter` are deliberately still absent, since
+      # their `struct iov_iter *` has a contract this vocabulary cannot state (see proc_ops' note).
+      fasync:
+        params:
+          fd:   { role: value }
+          file: { role: session }
+          on:   { role: value }
+    sequence: open ( read | write | unlocked_ioctl | compat_ioctl | poll | mmap | llseek | fasync )* release
+
+  # struct proc_ops (include/linux/proc_fs.h): procfs' own dispatch table. Slot for slot it is file_operations with
+  # a `proc_` prefix and the same parameter lists, and a procfs file is just as reachable from userspace -- so the
+  # contract is the same one, not a weaker variant. `proc_read_iter` and `proc_get_unmapped_area` are deliberately
+  # NOT listed: the first is handed an iov_iter whose contract this vocabulary cannot state yet, the second is an
+  # address-space query, not an I/O path. A slot a model omits is not an entry point (see hlir::iface), so leaving
+  # them out means "not covered", and that is visible in --entries iface's coverage diagnostic.
+  - interface: proc_ops
+    struct: proc_ops
+    label: untrusted
+    prologue: [ module_init ]
+    session:
+      param: file
+      created_by: proc_open
+      released_by: proc_release
+      handle: file.private_data
+    slots:
+      proc_open:
+        params:
+          inode: { role: kernel_owned }
+          file:  { role: session_out }
+        success: "ret == 0"
+      proc_release:
+        params:
+          inode: { role: kernel_owned }
+          file:  { role: session }
+      proc_read:
+        params:
+          file:  { role: session }
+          buf:   { role: user_addr, dir: out, size_from: count }
+          count: { role: value }
+          ppos:  { role: kernel_owned, dir: inout }
+      proc_write:
+        params:
+          file:  { role: session }
+          buf:   { role: user_addr, dir: in, size_from: count }
+          count: { role: value }
+          ppos:  { role: kernel_owned, dir: inout }
+      proc_ioctl:
+        params:
+          file: { role: session }
+          cmd:  { role: value }
+          arg:  { role: user_addr }
+      proc_compat_ioctl:
+        params:
+          file: { role: session }
+          cmd:  { role: value }
+          arg:  { role: user_addr }
+      proc_poll:
+        params:
+          file: { role: session }
+          wait: { role: kernel_owned }
+      proc_mmap:
+        params:
+          file: { role: session }
+          vma:  { role: kernel_owned }
+      proc_lseek:
+        params:
+          file:   { role: session }
+          offset: { role: value }
+          whence: { role: value }
+    sequence: proc_open ( proc_read | proc_write | proc_ioctl | proc_compat_ioctl | proc_poll | proc_mmap | proc_lseek )* proc_release

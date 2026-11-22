@@ -1,0 +1,21 @@
+core.func @sw(i32) -> i32 {
+^entry(%v: i32):
+  %a = core.const 1 : i32
+  %b = core.const 2 : i32
+  %c = core.const 3 : i32
+  core.switch %v [1: ^one, 2: ^two, -1: ^neg] default ^other(%c)
+^one:
+  core.return %a
+^two:
+  core.return %b
+^neg:
+  core.return %c
+^other(%x: i32):
+  core.return %x
+}
+core.func @sw0(i8) -> void {
+^entry(%v: i8):
+  core.switch %v [] default ^d
+^d:
+  core.return
+}

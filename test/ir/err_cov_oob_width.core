@@ -1,0 +1,10 @@
+// ERROR: missing dominating core.check.oob
+// FLAGS: coverage
+core.func @f(ptr) -> i32 {
+^entry(%p: ptr):
+  core.check.null %p
+  core.check.uaf %p
+  core.check.oob %p {w=1}
+  %v = core.load %p {align=4} : i32
+  core.return %v
+}

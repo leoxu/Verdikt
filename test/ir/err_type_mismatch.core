@@ -1,0 +1,6 @@
+// ERROR: operands must be integers of the same type
+core.func @f(i32, i64) -> i32 {
+^entry(%a: i32, %b: i64):
+  %r = core.add %a, %b : i32
+  core.return %r
+}

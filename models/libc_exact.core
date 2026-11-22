@@ -1,0 +1,49 @@
+// Exact (loop) versions of the C string functions, for concrete runs (hlir-run --libc) and tests: every byte read is checked, so an
+// unterminated string is an oob_read. The scanner uses the ModelDB versions of these (libc.yaml): they are one step instead of a
+// loop over the whole string, which matters for the symbolic engines. Not loaded together with libc.yaml.
+
+core.func @strlen(ptr) -> i64 {
+^entry(%s: ptr):
+  %n = core.call @__hlir_strlen(%s) : i64
+  core.return %n
+}
+
+
+
+
+
+core.func @strcpy(ptr, ptr) -> ptr {
+^entry(%d: ptr, %s: ptr):
+  %len = core.call @__hlir_strlen(%s) : i64
+  %one = core.const 1 : i64
+  %n = core.add %len, %one : i64
+  %r = core.call @memcpy(%d, %s, %n) : ptr
+  core.return %d
+}
+
+// output functions: nothing is printed
+core.func @printf(ptr) -> i32 {
+^entry(%f: ptr):
+  %r = core.const 0 : i32
+  core.return %r
+}
+core.func @fprintf(ptr, ptr) -> i32 {
+^entry(%s: ptr, %f: ptr):
+  %r = core.const 0 : i32
+  core.return %r
+}
+core.func @puts(ptr) -> i32 {
+^entry(%f: ptr):
+  %r = core.const 0 : i32
+  core.return %r
+}
+core.func @fputs(ptr, ptr) -> i32 {
+^entry(%f: ptr, %s: ptr):
+  %r = core.const 0 : i32
+  core.return %r
+}
+core.func @fflush(ptr) -> i32 {
+^entry(%s: ptr):
+  %r = core.const 0 : i32
+  core.return %r
+}

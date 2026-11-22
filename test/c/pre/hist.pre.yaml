@@ -1,0 +1,9 @@
+# the contracts of make_lengths / err_name, written down once
+preconditions:
+  - function: make_lengths
+    params:
+      alphaSize: { range: [0, 4] }
+      freq: { elements: { type: int32_t, range: [0, 8388607], count: alphaSize } }
+  - function: err_name
+    params:
+      c: { where: [ { field: err, range: [-3, 0] } ] }

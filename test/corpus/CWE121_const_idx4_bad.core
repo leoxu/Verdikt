@@ -1,0 +1,12 @@
+// EXPECT: oob_write
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %buf = core.alloca {size=4} : ptr
+  %i = core.const 4 : i64
+  %q = core.ptr_add %buf, %i : ptr
+  core.check.oob %q {w=1, access="w"}
+  %b = core.trunc %x : i8
+  core.store %b, %q
+  core.return %x
+}

@@ -1,0 +1,5 @@
+taint_entries:
+  - function: lookup
+    label: network
+    params:
+      idx: { taint: value, type: int }

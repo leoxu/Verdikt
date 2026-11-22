@@ -1,0 +1,23 @@
+// RUN: @f(5) env(x=3) => 3
+// RUN: @f(2) env(x=3) => infeasible
+// RUN: @g(0) => assert_failed
+// RUN: @g(1) => 1
+// RUN: @h() => ub:unreachable_reached
+core.func @f(i32) -> i32 {
+^entry(%a: i32):
+  %x = core.nondet {name="x", taint="network"} : i32
+  %c = core.icmp sle %x, %a : bool
+  core.assume %c
+  core.return %x
+}
+core.func @g(i32) -> i32 {
+^entry(%a: i32):
+  %z = core.const 0 : i32
+  %nz = core.icmp ne %a, %z : bool
+  core.assert %nz {msg="a must be nonzero"}
+  core.return %a
+}
+core.func @h() -> i32 {
+^entry:
+  core.unreachable
+}

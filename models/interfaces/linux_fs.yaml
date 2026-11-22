@@ -1,0 +1,176 @@
+# Call contracts for the Linux VFS dispatch tables (DESIGN.md §22.477). Kept apart from models/interfaces/linux.yaml
+# because the ATTACKER MODEL is different, and that difference is the whole content of this file.
+#
+# For `file_operations` the attacker is userspace: the handler's own parameters carry the attack (ioctl's `arg`,
+# write's `buf`, `count`). For a FILESYSTEM the attacker is the MOUNTED IMAGE, and it does not arrive through any
+# parameter -- it arrives through `sb_bread()` / `__bread_gfp()`, which is modelled separately (§22.475) and makes
+# `bh->b_data` attacker-controlled. What the VFS hands a filesystem handler is the VFS's OWN object graph:
+# super_block, inode, dentry, file, folio, address_space, fs_context. The VFS built every one of them.
+#
+# So almost everything here is `kernel_owned`, and that is the point. Generic synthesis marks all of it
+# attacker-controlled, which on fs/isofs produced 32 findings, none real -- `isofs_hashi` overflowing on a
+# `qstr` whose `len` the VFS bounds, `isofs_show_options` on a `seq_file` built field by field. Worse, it also
+# invented NULL for every pointer field it did not name, which is why `rock_ridge_symlink_read_folio` reached
+# 0% of its blocks: the `folio` it was handed had no pointers.
+#
+# THE NARROWING THIS MAKES, stated plainly: parts of that graph really are disk-derived. `isofs_sb_info`'s
+# `s_log_zone_size` is read off the primary volume descriptor at mount; calling the super_block kernel_owned says
+# the mount-time code validated it. For this round that is the right trade -- the use sites are a different entry
+# from the mount-time parser, so an unvalidated field looks unvalidated at every use whether or not it is (the
+# shape recorded in §22.474, measured again on zisofs's `block_shift`, which rock.c DOES validate). It is still a
+# narrowing: a genuinely unvalidated mount-time field is now invisible here, and finding one is the mount-path
+# entry's job, not this one's. Each kernel_owned is named in the report's assumptions, never silent.
+#
+# Roles: see models/interfaces/linux.yaml for the closed vocabulary.
+
+version: 1
+
+interfaces:
+  # include/linux/fs.h: struct super_operations
+  - interface: super_operations
+    struct: super_operations
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      alloc_inode:
+        params:
+          sb: { role: kernel_owned }
+      free_inode:
+        params:
+          inode: { role: kernel_owned }
+      put_super:
+        params:
+          sb: { role: kernel_owned }
+      statfs:
+        params:
+          dentry: { role: kernel_owned }
+          buf:    { role: out }
+      show_options:
+        params:
+          seq:  { role: out }
+          root: { role: kernel_owned }
+
+  # include/linux/fs.h: struct address_space_operations
+  #
+  # `folio` and `readahead_control` are page-cache objects the VFS owns; the bytes the handler DECOMPRESSES into
+  # them are its own output. The compressed input comes from sb_bread, not from here.
+  #
+  # `bmap`'s block number comes from the FIBMAP ioctl, so it is the caller's value even though the call needs
+  # CAP_SYS_RAWIO -- a privileged caller is still a caller, and the filesystem is what must not fall over.
+  - interface: address_space_operations
+    struct: address_space_operations
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      # The folio's object is sized PAGE_SIZE, not `sizeof(struct folio)`. A page-cache handler writes a PAGE
+      # into what it is handed -- `memzero_page(pages[i], off, PAGE_SIZE - off)`, whose own `VM_BUG_ON(offset +
+      # len > PAGE_SIZE)` states the invariant -- and a 256-byte object cannot satisfy it, so zisofs reported a
+      # confirmed oob_write that was entirely the object's size (DESIGN.md §22.481). Measured: it removes that
+      # finding and takes zisofs_read_folio from 267 to 283 blocks.
+      read_folio:
+        params:
+          file:  { role: kernel_owned }
+          folio: { role: kernel_owned, size: { min: 4096, max: 4096 } }
+      readahead:
+        params:
+          rac: { role: kernel_owned }
+      bmap:
+        params:
+          mapping: { role: kernel_owned }
+          block:   { role: value }
+
+  # include/linux/fs.h: struct inode_operations (the slots a read-only on-disk filesystem fills)
+  #
+  # `dentry` holds the name being looked up, which IS a user path -- but it is a path the VFS has already
+  # length-checked, and what a lookup overruns is the DIRECTORY it reads off the disk. Marking the dentry
+  # kernel_owned keeps the search for the name honest and leaves the attack where it really is.
+  - interface: inode_operations
+    struct: inode_operations
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      lookup:
+        params:
+          dir:    { role: kernel_owned }
+          dentry: { role: kernel_owned }
+          flags:  { role: value }
+
+  # include/linux/exportfs.h: struct export_operations
+  #
+  # THE EXCEPTION IN THIS FILE. A file handle arrives from an NFS client over the wire: `fid`, `fh_len` and
+  # `fh_type` are the attacker's, and a filesystem that trusts them is the classic exportfs bug. This is the one
+  # VFS table whose parameters really do carry the attack.
+  - interface: export_operations
+    struct: export_operations
+    label: untrusted
+    slots:
+      encode_fh:
+        params:
+          inode:   { role: kernel_owned }
+          fh:      { role: out }
+          max_len: { role: kernel_owned, dir: inout }
+          parent:  { role: kernel_owned }
+      fh_to_dentry:
+        params:
+          sb:      { role: kernel_owned }
+          fid:     { role: value }
+          fh_len:  { role: value }
+          fh_type: { role: value }
+      fh_to_parent:
+        params:
+          sb:      { role: kernel_owned }
+          fid:     { role: value }
+          fh_len:  { role: value }
+          fh_type: { role: value }
+      get_parent:
+        params:
+          child: { role: kernel_owned }
+
+  # include/linux/dcache.h: struct dentry_operations
+  #
+  # `d_hash`/`d_compare` are called on every path component. The qstr and the `const char *` are names: the VFS
+  # has already bounded them (a component is at most NAME_MAX, and `len` is the length of `str`, not a separate
+  # number the attacker chose). Synthesising them as free attacker data is what produced the isofs_hashi,
+  # isofs_hash_ms and isofs_dentry_cmp_ms findings, all three of them artefacts of an unbounded `len`.
+  - interface: dentry_operations
+    struct: dentry_operations
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      d_hash:
+        params:
+          dentry: { role: kernel_owned }
+          qstr:   { role: kernel_owned }
+      # `len` and `str` are a LENGTH AND ITS BUFFER, so they are modelled as a self-consistent pair rather than as
+      # kernel-owned constants: `value` plus `size_from` makes `len` symbolic and ties it to the object, which is
+      # the bound the VFS really provides. Marking them kernel_owned instead left `len` a fixed value, and a
+      # relation against a fixed value does not compile (§22.478) -- the contract deleted its own entries.
+      d_compare:
+        params:
+          dentry: { role: kernel_owned }
+          len:    { role: value }
+          str:    { role: value, size_from: len }
+          name:   { role: kernel_owned }
+
+  # include/linux/fs_context.h: struct fs_context_operations
+  #
+  # `param` is a mount option, which mount(2) supplies: the one attacker-controlled thing in the mount path that
+  # is NOT the image itself.
+  - interface: fs_context_operations
+    struct: fs_context_operations
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      free:
+        params:
+          fc: { role: kernel_owned }
+      parse_param:
+        params:
+          fc:    { role: kernel_owned }
+          param: { role: value }
+      get_tree:
+        params:
+          fc: { role: kernel_owned }
+      reconfigure:
+        params:
+          fc: { role: kernel_owned }

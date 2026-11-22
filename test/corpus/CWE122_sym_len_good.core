@@ -1,0 +1,23 @@
+// EXPECT: none
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%len: i32):
+  %z = core.const 0 : i32
+  %pos = core.icmp sgt %len, %z : bool
+  core.assume %pos
+  %zero64 = core.const 0 : i64
+  %n = core.sext %len : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  %one = core.const 1 : i64
+  %off = core.sub %n, %one : i64
+  %q = core.ptr_add %p, %off : ptr
+  core.check.ptr_arith %p, %off
+  core.check.null %q
+  core.check.uaf %q
+  core.check.oob %q {w=1, access="w"}
+  %b = core.const 0 : i8
+  core.store %b, %q
+  core.check.free %p {expect=heap}
+  core.free %p
+  core.return %z
+}

@@ -1,0 +1,6 @@
+taint_entries:
+  - function: parse
+    label: network
+    params:
+      p:   { taint: pointee, kind: buffer, size: { min: 12, max: 12 } }
+      out: { taint: none,    kind: buffer, size: { min: 64, max: 64 } }

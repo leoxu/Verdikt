@@ -1,0 +1,19 @@
+// EXPECT: null_deref
+// ENTRY: f
+// LIBC
+core.declare @malloc(i64) -> ptr
+core.declare @free(ptr) -> void
+core.declare @calloc(i64, i64) -> ptr
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.declare @memset(ptr, i32, i64) -> ptr
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 4 : i64
+  %p = core.call @malloc(%n) : ptr
+  core.check.null %p
+  core.store %x, %p
+  core.call @free(%p)
+  core.br ^ret
+^ret:
+  core.return %x
+}

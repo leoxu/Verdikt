@@ -1,0 +1,6 @@
+// ERROR: call to undeclared function @nope
+core.func @f() -> void {
+^entry:
+  core.call @nope()
+  core.return
+}

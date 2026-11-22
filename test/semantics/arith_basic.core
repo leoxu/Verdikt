@@ -1,0 +1,31 @@
+// RUN: @add3(1, 2, 3) => 6
+// RUN: @add3(2147483647, 1, 0) => -2147483648
+// RUN: @mix(5, true) => 15
+// RUN: @mix(5, false) => 5
+// RUN: @wide(-1) => -1
+// RUN: @bits(0x1234) => 0x3412
+core.func @add3(i32, i32, i32) -> i32 {
+^entry(%a: i32, %b: i32, %c: i32):
+  %s = core.add %a, %b : i32
+  %r = core.add %s, %c : i32
+  core.return %r
+}
+core.func @mix(i32, bool) -> i32 {
+^entry(%a: i32, %f: bool):
+  %k = core.const 10 : i32
+  %s = core.add %a, %k : i32
+  %r = core.select %f, %s, %a : i32
+  core.return %r
+}
+core.func @wide(i8) -> i64 {
+^entry(%a: i8):
+  %w = core.sext %a : i64
+  core.return %w
+}
+core.func @bits(i16) -> i16 {
+^entry(%a: i16):
+  %lo = core.extract %a {hi=7, lo=0} : i8
+  %hi = core.extract %a {hi=15, lo=8} : i8
+  %r = core.concat %lo, %hi : i16
+  core.return %r
+}

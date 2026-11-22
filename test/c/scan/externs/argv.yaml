@@ -1,0 +1,1 @@
+argv: [ prog, -c, "3", -l, /lib/x.so ]

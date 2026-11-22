@@ -1,0 +1,3 @@
+models:
+  - function: ext_attr_init
+    source: [ { label: attacker, ptr: arg0, size: 64 } ]

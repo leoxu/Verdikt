@@ -1,0 +1,13 @@
+// EXPECT: ptr_arith_oob
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %buf = core.alloca {size=16} : ptr
+  %i = core.const -1 : i64
+  core.check.ptr_arith %buf, %i
+  %q = core.ptr_add %buf, %i : ptr
+  core.check.oob %q {w=1, access="w"}
+  %b = core.const 1 : i8
+  core.store %b, %q
+  core.return %x
+}

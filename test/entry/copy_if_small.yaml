@@ -1,0 +1,13 @@
+defaults:
+  attacker_model: full_type
+  max_obj: 4096
+
+taint_entries:
+  - function: copy_if_small
+    label: network
+    params:
+      dst: { taint: none,    kind: buffer, size: { min: 256, max: 256 } }
+      src: { taint: pointee, kind: buffer, size: { min: 1, max: 4096 } }
+      len: { taint: value,   type: int }
+    relations:
+      - "len >= 0 => (size_t)len <= size(src)"

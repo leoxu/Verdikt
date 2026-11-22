@@ -1,0 +1,114 @@
+# Call-contract models for the QNX Neutrino resource-manager dispatch tables (DESIGN.md §22.357).
+#
+# A QNX resmgr is a server process: clients reach it with `devctl()`/`read()`/`write()` on a device node it attached
+# with `resmgr_attach()`, and the library dispatches each received message to a slot of `resmgr_io_funcs_t` or
+# `resmgr_connect_funcs_t`. Every slot has the same three parameters, so one contract covers every resmgr in the
+# tree -- which is the whole reason this layer exists.
+#
+# WHY THIS FILE IS NEEDED AT ALL, in one fact:
+#
+#     int foo_devctl(resmgr_context_t *ctp, io_devctl_t *msg, RESMGR_OCB_T *ocb) {
+#         ...
+#         rx_data = _DEVCTL_DATA((msg->i));        // devctl.h: ((void *)(sizeof(msg) + (char *)(&msg)))
+#         switch (msg->i.dcmd) { case X: use(rx_data->field); ... }
+#     }
+#
+# `io_devctl_t` is a 16-byte union (`_io_devctl`: type, combine_len, dcmd, nbytes, zero). The REQUEST PAYLOAD starts
+# at byte 16, inside the same allocation -- the receive buffer the resmgr library handed the dispatch loop, whose
+# size is `resmgr_attr.msg_max_size`. Sized by its declared type, `msg` is 16 bytes and EVERY payload access is out
+# of bounds before the handler has executed a single statement of its own. That is a fact about the C declaration,
+# not about the code, and it is what `size:` below corrects.
+#
+# Roles: see models/interfaces/linux.yaml for the closed vocabulary.
+#
+# ---------------------------------------------------------------------------------------------------------------
+# The `size: { min: 2048, max: 2048 }` constant, and how to get it right for a given module
+# ---------------------------------------------------------------------------------------------------------------
+#
+# 2048 is not a guess and it is not a universal truth: it is what most of the resmgrs in this tree pass to
+# `resmgr_attr.msg_max_size` (<driver>, <driver>, <driver>, <driver>, <driver>, ... all `= 2048`), and the QNX
+# dispatch layer allocates exactly that. Others differ -- <driver> uses 1024, <driver> and <driver>
+# use their own named constants, <driver> picks between two values at run time.
+#
+# So: READ THE MODULE'S `resmgr_attach`/`channel_attr[].msg_max_size` AND OVERRIDE THIS PER MODULE with a spec in
+# `--spec-dir` when it is not 2048. A size that is too small invents out-of-bounds findings on payload the module
+# may legally touch; a size that is too large hides the real ones. Both directions are wrong, and neither is
+# detectable from the handler's own source -- which is exactly why the generated spec names this size in its
+# `assumptions` and why it is deliberately a FIXED size rather than a range (a symbolic size in [16, 2048] would
+# report an out-of-bounds access whenever SOME size in the range allows it, i.e. almost always).
+#
+# ---------------------------------------------------------------------------------------------------------------
+# What this contract does NOT say, and must not be read as saying
+# ---------------------------------------------------------------------------------------------------------------
+#
+#  * It does not bound `msg->i.nbytes`. The client chooses it; what makes it safe is the module calling
+#    `devctl_verify_len(..., _IO_DEVCTL_VERIFY_MSG_LEN | _IO_DEVCTL_VERIFY_LEN)` or checking it by hand. That
+#    is per-module behaviour, so it belongs in models/qnx.core (the verify function) and in the module's own code,
+#    not in an interface-wide contract. A module that forgets the check is exactly what we are looking for.
+#  * It does not say the payload is as long as `nbytes` says. `nbytes` is attacker data; the buffer is
+#    `msg_max_size`. A handler that trusts `nbytes` over the real buffer is, again, the finding.
+#  * `ocb` is declared `session` with no constructor slot in this table (the OCB is built by the CONNECT table's
+#    `open`, a different struct, and running it is not implemented). That degrades to untainted kernel-owned state
+#    and the report says so. It matters: per-fd OCB state a previous devctl from the same client really can
+#    influence -- <driver>'s `ocb->ability_cache[]` authorisation cache is a confirmed instance -- is assumed clean
+#    here, so a finding that needs a poisoned OCB will NOT be found by a single-slot run. Use the sequence harness
+#    or a hand-written spec for those.
+
+version: 1
+
+interfaces:
+  # sys/resmgr.h: `typedef struct _resmgr_io_funcs { unsigned nfuncs; int (*read)(...); ... } resmgr_io_funcs_t;`
+  #
+  # Registered either as a designated initialiser or, far more often in this tree, field by field
+  # (`io_funcs.devctl = foo_devctl;`). The frontend records both forms, so both are picked up.
+  - interface: resmgr_io_funcs
+    struct: _resmgr_io_funcs
+    label: untrusted
+    slots:
+      # The main attack surface: one `devctl()` call from any process that can open the device node.
+      devctl:
+        params:
+          ctp: { role: kernel_owned, dir: inout }
+          msg: { role: value, dir: inout, size: { min: 2048, max: 2048 } }
+          ocb: { role: session, dir: inout }
+
+      # `io_read_t` is a 16-byte header too (`_io_read`: type, combine_len, nbytes, xtype, zero). A read handler
+      # usually only consumes `msg->i.nbytes` and writes its reply through `resmgr_msgwrite`/`SETIOV`, but the
+      # buffer behind `msg` is the same receive buffer, so it is given the same extent for the same reason.
+      read:
+        params:
+          ctp: { role: kernel_owned, dir: inout }
+          msg: { role: value, dir: inout, size: { min: 2048, max: 2048 } }
+          ocb: { role: session, dir: inout }
+
+      # A write handler's data really does sit in the receive buffer after the 16-byte `_io_write` header (that is
+      # what `_IO_WRITE_GET_PTR` hands back), so the extent here is load-bearing, not just defensive.
+      write:
+        params:
+          ctp: { role: kernel_owned, dir: inout }
+          msg: { role: value, dir: inout, size: { min: 2048, max: 2048 } }
+          ocb: { role: session, dir: inout }
+
+      # `_IO_MSG`: a raw, module-defined message type. Same buffer, same reasoning, and no `devctl` size encoding
+      # at all -- so a module's own `msg` handler is if anything a softer target than its devctl.
+      msg:
+        params:
+          ctp: { role: kernel_owned, dir: inout }
+          msg: { role: value, dir: inout, size: { min: 2048, max: 2048 } }
+          ocb: { role: session, dir: inout }
+
+  # sys/resmgr.h: `typedef struct _resmgr_connect_funcs { unsigned nfuncs; int (*open)(...); ... }`
+  #
+  # `open` is reachable before any OCB exists, so it is the one slot where there is no session state to assume
+  # anything about. `handle` is the attr structure the module registered with `resmgr_attach()` -- its own, built
+  # at startup -- and `extra` is the resmgr library's `io_open_extra_t`.
+  - interface: resmgr_connect_funcs
+    struct: _resmgr_connect_funcs
+    label: untrusted
+    slots:
+      open:
+        params:
+          ctp:    { role: kernel_owned, dir: inout }
+          msg:    { role: value, dir: inout, size: { min: 2048, max: 2048 } }
+          handle: { role: kernel_owned, dir: inout }
+          extra:  { role: kernel_owned, dir: inout }

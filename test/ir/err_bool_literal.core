@@ -1,0 +1,6 @@
+// ERROR: boolean literal requires type bool
+core.func @f() -> void {
+^entry:
+  %x = core.const true : i32
+  core.return
+}

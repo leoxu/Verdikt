@@ -1,0 +1,68 @@
+// RUN: @sum_to(0) => 0
+// RUN: @sum_to(10) => 45
+// RUN: @fact(5) => 120
+// RUN: @fib(10) => 55
+// RUN: @classify(1) => 10
+// RUN: @classify(2) => 20
+// RUN: @classify(-1) => 30
+// RUN: @classify(77) => 99
+core.func @sum_to(i32) -> i32 {
+^entry(%n: i32):
+  %zero = core.const 0 : i32
+  core.br ^head(%zero, %zero)
+^head(%i: i32, %acc: i32):
+  %c = core.icmp slt %i, %n : bool
+  core.cond_br %c, ^body, ^exit(%acc)
+^body:
+  %one = core.const 1 : i32
+  %acc2 = core.add %acc, %i : i32
+  %i2 = core.add %i, %one : i32
+  core.br ^head(%i2, %acc2)
+^exit(%r: i32):
+  core.return %r
+}
+core.func @fact(i32) -> i32 {
+^entry(%n: i32):
+  %one = core.const 1 : i32
+  %le = core.icmp sle %n, %one : bool
+  core.cond_br %le, ^base, ^rec
+^base:
+  core.return %one
+^rec:
+  %m = core.sub %n, %one : i32
+  %r = core.call @fact(%m) : i32
+  %p = core.mul %n, %r : i32
+  core.return %p
+}
+core.func @fib(i32) -> i32 {
+^entry(%n: i32):
+  %two = core.const 2 : i32
+  %lt = core.icmp slt %n, %two : bool
+  core.cond_br %lt, ^base, ^rec
+^base:
+  core.return %n
+^rec:
+  %one = core.const 1 : i32
+  %a = core.sub %n, %one : i32
+  %b = core.sub %n, %two : i32
+  %x = core.call @fib(%a) : i32
+  %y = core.call @fib(%b) : i32
+  %r = core.add %x, %y : i32
+  core.return %r
+}
+core.func @classify(i32) -> i32 {
+^entry(%v: i32):
+  %a = core.const 10 : i32
+  %b = core.const 20 : i32
+  %c = core.const 30 : i32
+  %d = core.const 99 : i32
+  core.switch %v [1: ^one, 2: ^two, -1: ^neg] default ^other
+^one:
+  core.return %a
+^two:
+  core.return %b
+^neg:
+  core.return %c
+^other:
+  core.return %d
+}

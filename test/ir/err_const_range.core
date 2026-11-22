@@ -1,0 +1,6 @@
+// ERROR: does not fit in type i8
+core.func @f() -> void {
+^entry:
+  %x = core.const 300 : i8
+  core.return
+}

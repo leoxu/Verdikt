@@ -1,0 +1,7 @@
+// ERROR: missing dominating core.check.div
+// FLAGS: coverage
+core.func @f(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  %q = core.udiv %a, %b : i32
+  core.return %q
+}

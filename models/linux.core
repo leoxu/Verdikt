@@ -1,0 +1,467 @@
+// Linux kernel API models written in `core` (hlir-scan --linux). Like libc.core they run on every engine and carry the
+// UB checks the real routine would hit. They complete the extern declarations the kernel headers leave (the
+// `__kmalloc_noprof` etc. behind the inline kmalloc/kzalloc wrappers, which are lowered from the header themselves).
+// hlir-extern: copy_from_user copy_to_user _inline_copy_from_user _inline_copy_to_user memdup_user lowmem_page_address arch_static_branch
+// ^ the kernel headers define these as inlines around inline assembly; the C frontend keeps them as declarations
+//   (hlir-scan --linux reads this line) so the bodies below, which carry the real UB checks, are used instead.
+// GFP_ZERO is 0x100 (___GFP_ZERO_BIT == 8 in include/linux/gfp_types.h of the 6.x/7.x trees).
+
+// unsigned long _copy_from_user(void *to, const void __user *from, unsigned long n): 0 on success, else bytes NOT copied.
+// Fails (copies nothing, returns n) or copies everything; both outcomes are explored.
+core.func @_copy_from_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done0, ^try
+^try:
+  %f = core.nondet {name="copy_from_user_fault"} : bool
+  core.cond_br %f, ^fault, ^copy
+^fault:
+  core.return %n
+^copy:
+  core.check.null %to
+  core.check.uaf %to
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %tl = core.ptr_add %to, %last : ptr
+  core.check.ptr_arith %to, %last
+  core.check.oob %to {w=1, access="w", origin="copy_from_user dst start"}
+  core.check.oob %tl {w=1, access="w", origin="copy_from_user dst end"}
+  // `from` is a __user pointer: the real kernel access is fault-safe (the page-fault handler intercepts an
+  // illegal user-space access and copy_from_user() returns a nonzero byte count instead of corrupting kernel
+  // state), so unlike `to` it must NOT be checked against a synthesized "object size" -- that constraint has no
+  // counterpart in the real ABI and only produces a spurious oob/ptr_arith report when the copy length has no
+  // relation to any parameter (docs/DESIGN.md §22.128/§22.129, fix landed per the follow-up round that deleted
+  // this block). `to` above is unaffected: it is a real kernel buffer and its check stays exactly as it was.
+  core.memcpy %to, %from, %n
+  core.return %z
+^done0:
+  core.return %z
+}
+
+// unsigned long _copy_to_user(void __user *to, const void *from, unsigned long n): reads n bytes of kernel memory.
+core.func @_copy_to_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done0, ^try
+^try:
+  %f = core.nondet {name="copy_to_user_fault"} : bool
+  core.cond_br %f, ^fault, ^copy
+^fault:
+  core.return %n
+^copy:
+  core.check.null %from
+  core.check.uaf %from
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %fl = core.ptr_add %from, %last : ptr
+  core.check.ptr_arith %from, %last
+  core.check.oob %from {w=1, access="r", origin="copy_to_user src start"}
+  core.check.oob %fl {w=1, access="r", origin="copy_to_user src end"}
+  core.return %z
+^done0:
+  core.return %z
+}
+
+// void *__kmalloc_noprof(size_t size, gfp_t flags) and friends: NULL or a fresh object; zeroed with __GFP_ZERO.
+core.func @__kmalloc_noprof(i64, i32) -> ptr {
+^entry(%n: i64, %fl: i32):
+  %p = core.heap_alloc %n {fail=nondet, name="kmalloc_fail"} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^out, ^maybe
+^maybe:
+  %zf = core.const 256 : i32
+  %m = core.and %fl, %zf : i32
+  %z = core.const 0 : i32
+  %wantz = core.icmp ne %m, %z : bool
+  core.cond_br %wantz, ^zero, ^out
+^zero:
+  %b = core.const 0 : i8
+  core.memset %p, %b, %n
+  core.br ^out
+^out:
+  core.return %p
+}
+core.func @__kmalloc_large_noprof(i64, i32) -> ptr {
+^entry(%n: i64, %fl: i32):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  core.return %p
+}
+core.func @__kmalloc_cache_noprof(ptr, i32, i64) -> ptr {
+^entry(%cache: ptr, %fl: i32, %n: i64):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  core.return %p
+}
+core.func @devm_kmalloc(ptr, i64, i32) -> ptr {
+^entry(%dev: ptr, %n: i64, %fl: i32):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  core.return %p
+}
+
+// void *__kvmalloc_node_noprof(size_t size, gfp_t flags, int node) and the vmalloc family: same contract as
+// __kmalloc_noprof (NULL-or-fresh-object, zeroed on __GFP_ZERO) -- kvmalloc/kvzalloc/vmalloc/vzalloc fall back to
+// vmalloc for large sizes, but from an analysis standpoint it's still "allocate N bytes, optionally zeroed".
+// Without this model these out-of-line mm/util.c/mm/vmalloc.c functions have no visible body in a DRM/amdgpu/TTM-only
+// link scope, so callers like amdgpu_bo_create()'s `bo = kvzalloc(bp->bo_ptr_size, ...)` got treated as an
+// unconstrained external call instead of a correctly-sized allocation, producing spurious ptr_arith_oob findings on
+// every field access into `bo` downstream (e.g. drm_vma_offset_add via ttm_bo_init_reserved).
+core.func @__kvmalloc_node_noprof(i64, i32, i32) -> ptr {
+^entry(%n: i64, %fl: i32, %node: i32):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  core.return %p
+}
+core.func @vmalloc(i64) -> ptr {
+^entry(%n: i64):
+  %z = core.const 0 : i32
+  %p = core.call @__kmalloc_noprof(%n, %z) : ptr
+  core.return %p
+}
+core.func @vzalloc(i64) -> ptr {
+^entry(%n: i64):
+  %zf = core.const 256 : i32
+  %p = core.call @__kmalloc_noprof(%n, %zf) : ptr
+  core.return %p
+}
+core.func @__vmalloc_noprof(i64, i32) -> ptr {
+^entry(%n: i64, %fl: i32):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  core.return %p
+}
+
+// void kfree(const void *p): kfree(NULL) is a no-op.
+core.func @kfree(ptr) -> void {
+^entry(%p: ptr):
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^done, ^do
+^do:
+  core.check.free %p {expect=heap, origin="kfree"}
+  core.free %p
+  core.br ^done
+^done:
+  core.return
+}
+
+// void *kmemdup_noprof(const void *src, size_t len, gfp_t gfp)
+core.func @kmemdup_noprof(ptr, i64, i32) -> ptr {
+^entry(%src: ptr, %n: i64, %fl: i32):
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^out, ^copy
+^copy:
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^out, ^do
+^do:
+  core.check.null %src
+  core.check.uaf %src
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %sl = core.ptr_add %src, %last : ptr
+  core.check.ptr_arith %src, %last
+  core.check.oob %src {w=1, access="r", origin="kmemdup src start"}
+  core.check.oob %sl {w=1, access="r", origin="kmemdup src end"}
+  core.memcpy %p, %src, %n
+  core.br ^out
+^out:
+  core.return %p
+}
+
+// the inline wrappers of the headers (which the frontend leaves as declarations, see above) behave like the out-of-line versions
+core.func @copy_from_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %r = core.call @_copy_from_user(%to, %from, %n) : i64
+  core.return %r
+}
+core.func @_inline_copy_from_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %r = core.call @_copy_from_user(%to, %from, %n) : i64
+  core.return %r
+}
+core.func @copy_to_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %r = core.call @_copy_to_user(%to, %from, %n) : i64
+  core.return %r
+}
+core.func @_inline_copy_to_user(ptr, ptr, i64) -> i64 {
+^entry(%to: ptr, %from: ptr, %n: i64):
+  %r = core.call @_copy_to_user(%to, %from, %n) : i64
+  core.return %r
+}
+
+// void *memdup_user(const void __user *src, size_t len): a kernel copy of user memory. Real memdup_user never
+// returns NULL on failure -- it returns ERR_PTR(-ENOMEM) if the allocation fails, or frees the buffer and returns
+// ERR_PTR(-EFAULT) if the copy faults -- and every real caller checks the result with IS_ERR(), which (compiled
+// from the real, unmodelled include/linux/err.h) is false for NULL. An earlier version of this model returned
+// plain NULL on both failure paths and silently dropped the copy's own return value; real callers' IS_ERR() checks
+// don't catch a plain NULL, so that NULL flowed on into code that assumed it had passed IS_ERR() and dereferenced
+// it -- a scanner-manufactured null_deref/uninit_read with no real-kernel counterpart (found via fs/btrfs's
+// btrfs_ioctl_fs_info, docs/DESIGN.md §22.319/22.320). Fixed to return the real ERR_PTR-encoded sentinels.
+core.func @memdup_user(ptr, i64) -> ptr {
+^entry(%src: ptr, %n: i64):
+  %fl = core.const 0 : i32
+  %p = core.call @__kmalloc_noprof(%n, %fl) : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^nomem, ^copy
+^nomem:
+  %enomem = core.const -12 : i64
+  %enomemp = core.int_to_ptr %enomem : ptr
+  core.return %enomemp
+^copy:
+  %r = core.call @_copy_from_user(%p, %src, %n) : i64
+  %z = core.const 0 : i64
+  %ok = core.icmp eq %r, %z : bool
+  core.cond_br %ok, ^out, ^fault
+^fault:
+  core.free %p
+  %efault = core.const -14 : i64
+  %efaultp = core.int_to_ptr %efault : ptr
+  core.return %efaultp
+^out:
+  core.return %p
+}
+
+// ---- formatted output, kernel-signature override: `snprintf`/`sprintf` are declared in include/linux/sprintf.h,
+// which a kernel build includes with `-I`, not `-isystem` -- so clang does not treat it as a system header, and the
+// frontend's "library variadics keep their plain signature" rule (lib/frontend/Frontend.cpp's `passesVaBlock`) does
+// not apply: like any other project-defined variadic function, they get an extra trailing pointer parameter for the
+// `...` arguments. libc.core's `snprintf`/`sprintf` models assume the plain (glibc, true system header) signature
+// and would conflict with this one at parse time (same name, different arity) if both were loaded -- hlir-scan.cpp
+// strips libc.core's bodies of every name listed here before appending this file. Behaviour matches libc.core's:
+// formatted text is not modelled, the buffer receives the NUL terminator (when there is room) and the result is 0.
+// hlir-override: snprintf sprintf vsnprintf
+// Return value modelled the same way as libc.core's @snprintf (bounded tainted nondet, not hardcoded 0) -- see that
+// function's comment for the full rationale (docs/DESIGN.md Sec.22.205/22.298). Keep both in sync.
+core.func @snprintf(ptr, i64, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %n: i64, %fmt: ptr, %va: ptr):
+  %z = core.const 0 : i64
+  %has = core.icmp ne %n, %z : bool
+  core.cond_br %has, ^put, ^out
+^put:
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="snprintf buffer"}
+  %nul = core.const 0 : i8
+  core.store %nul, %buf {waived="checked above"}
+  core.br ^out
+^out:
+  %rn = core.nondet {name="snprintf_wouldwrite", taint="fmt"} : i32
+  %rzero = core.const 0 : i32
+  %rcap = core.const 65536 : i32
+  %rneg = core.icmp slt %rn, %rzero : bool
+  %rnn = core.select %rneg, %rzero, %rn : i32
+  %rover = core.icmp sgt %rnn, %rcap : bool
+  %r = core.select %rover, %rcap, %rnn : i32
+  core.return %r
+}
+// vsnprintf itself is not variadic (it already takes a real `va_list` 4th parameter in C), so its own declared arity
+// is unaffected by the system-header heuristic and always matches libc.core's -- it is only listed here because its
+// *body* calls `@snprintf` with libc.core's 3-argument form, which no longer exists once that name is overridden.
+core.func @vsnprintf(ptr, i64, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %n: i64, %fmt: ptr, %ap: ptr):
+  %r = core.call @snprintf(%buf, %n, %fmt, %ap) : i32
+  core.return %r
+}
+core.func @sprintf(ptr, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %fmt: ptr, %va: ptr):
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="sprintf buffer"}
+  %nul = core.const 0 : i8
+  core.store %nul, %buf {waived="checked above"}
+  %r = core.const 0 : i32
+  core.return %r
+}
+
+// unsigned long get_free_pages_noprof(gfp_t gfp_mask, unsigned int order)
+//   `__get_free_page(gfp)` is `__get_free_pages(gfp, 0)` is `alloc_hooks(get_free_pages_noprof(gfp, 0))`.
+//
+// Why this is a `.core` body and not a `returns: { alloc: ... }` line in linux.yaml (DESIGN.md §22.476):
+//
+//  1. The size is `PAGE_SIZE << order`, and the declarative `size:` grammar has no shift. Writing 4096 would
+//     UNDER-allocate for order > 0 and manufacture an out-of-bounds report on correct code, which is the one
+//     thing a model may never do.
+//  2. The result is an `unsigned long`, not a pointer, and the caller casts it with `int_to_ptr`. That cast
+//     recovers the object only from a CONSTANT `id << 32 | offset` (Machine.h, Opc::IntToPtr), so the pointer
+//     fed to `core.ptr_to_int` must not be the `select(fail, NULL, obj)` that `{fail=nondet}` produces --
+//     through a select the cast yields object 0 and the page reads back NULL, which is the failure this model
+//     exists to end. The failure path is therefore forked EXPLICITLY here and the allocation itself cannot
+//     fail, so the success path carries a plain object id.
+//
+// Measured on fs/isofs (round 43): `isofs_readdir` stops at `if (tmpname == NULL) return -ENOMEM` with BOTH
+// directions classified `const` -- the condition was never symbolic -- and reaches 6 of 1059 blocks.
+//
+// MAX_PAGE_ORDER is 10 (include/linux/mmzone.h, 6.12): a larger order really does return 0, and saying so
+// also keeps the shift below the width of the type instead of leaving it to a check.
+core.func @get_free_pages_noprof(i32, i32) -> i64 {
+^entry(%gfp: i32, %order: i32):
+  %zero = core.const 0 : i64
+  %maxord = core.const 10 : i32
+  %toobig = core.icmp ugt %order, %maxord : bool
+  core.cond_br %toobig, ^fail, ^try
+^try:
+  %f = core.nondet {name="get_free_pages_fail"} : bool
+  core.cond_br %f, ^fail, ^ok
+^fail:
+  core.return %zero
+^ok:
+  %page = core.const 4096 : i64
+  %ord64 = core.zext %order : i64
+  %n = core.shl %page, %ord64 {waived="order is bounded by MAX_PAGE_ORDER above"} : i64
+  %p = core.heap_alloc %n {fail=never, name="get_free_pages"} : ptr
+  %zf = core.const 256 : i32
+  %m = core.and %gfp, %zf : i32
+  %z32 = core.const 0 : i32
+  %wantz = core.icmp ne %m, %z32 : bool
+  core.cond_br %wantz, ^zero, ^out
+^zero:
+  %b = core.const 0 : i8
+  core.memset %p, %b, %n
+  core.br ^out
+^out:
+  %a = core.ptr_to_int %p : i64
+  core.return %a
+}
+
+// void *lowmem_page_address(const struct page *page)  --  and through it `page_address()` and `folio_address()`
+//
+// The real inline turns a `struct page *` into a kernel virtual address by ARITHMETIC (DESIGN.md §22.479):
+//
+//     __va(PFN_PHYS(page_to_pfn(page)))
+//       = int_to_ptr(((ptr_diff(page, int_to_ptr(vmemmap_base)) / 64) << 12) + page_offset_base)
+//
+// Lowered faithfully, that is a pointer difference against a fabricated address, divided, shifted, and turned
+// back into a pointer -- and an integer has no provenance, so the result is object 0. **Every `page_address()`
+// in the kernel returns NULL to the scanner**, which is why `isofs_lookup` stops at `alloc_page` and
+// `rock_ridge_symlink_read_folio` writes the symlink it decodes through a null pointer.
+//
+// The model returns the page pointer ITSELF. Two things that buys, and one the reader has to know:
+//
+//  * It is STABLE. `isofs_find_entry(dir, dentry, &block, &offset, page_address(page), 1024 + page_address(page))`
+//    calls it twice and depends on the second being the first plus 1024. A model that allocated a fresh object
+//    per call would make those two unrelated objects and the bounds of neither would mean anything.
+//  * It is BOUNDED by a real object -- the page's own -- so a write past the page is a finding rather than a
+//    fact about an invented size (the synthesis frontier's problem, §22.364).
+//  * It CONFLATES the `struct page` with the bytes it describes: code that reads `page->flags` here reads the
+//    first bytes of the data. No filesystem does, but a driver that does would be analysed wrong. The honest
+//    alternative needs a per-page data object the model layer can name twice, which `points_to` (§22.475)
+//    cannot express because `page_address` has no object to hang it on.
+//
+// It is on the `hlir-extern:` line above because the header inline is `static`: the linker renames a static that
+// several units define to `name.u0`, `name.u1`, ... (lib/link/Link.cpp), and a model keyed by the plain name
+// would never match any of them. Stripping the body makes it one external symbol, which this body then completes.
+core.func @lowmem_page_address(ptr) -> ptr {
+^entry(%page: ptr):
+  core.return %page
+}
+
+// int _printk(const char *fmt, ...): kernel printk (pr_*/dev_*/p9_debug all reach it). It writes only the log
+// ring -- nothing a caller owns -- and its int result (chars emitted) is never used for a bound or index. No-op
+// returning 0. Left opaque it folds every debug-guarded branch to a constant and fails the opaque_calls gate on a
+// hot parse loop (p9_check_errors: _printk x931). Plain external, no `// hlir-extern:` entry needed.
+core.func @_printk(ptr, ptr) -> i32 {
+^entry(%fmt: ptr, %va: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// int ___ratelimit(struct ratelimit_state *rs, const char *func): the core of net_ratelimit()/printk_ratelimited.
+// Returns whether a message should be emitted now; never a bound or index, writes only its own ratelimit state.
+// Nondet result so both the emit and suppress edges of `if (net_ratelimit()) pr_*()` stay explored. Ubiquitous on
+// every kernel error/log path (all of net/sched's netlink parsers hit it); left opaque it fails the gate.
+core.func @___ratelimit(ptr, ptr) -> i32 {
+^entry(%rs: ptr, %func: ptr):
+  %r = core.nondet {name="ratelimit"} : i32
+  core.return %r
+}
+
+// void do_trace_netlink_extack(const char *msg): the NL_SET_ERR_MSG tracepoint. No-op (writes nothing a caller
+// owns). Ubiquitous on netlink error paths; left opaque it fails the gate on every netlink attribute parser.
+core.func @do_trace_netlink_extack(ptr) -> void {
+^entry(%msg: ptr):
+  core.return
+}
+
+// bool arch_static_branch(struct static_key *key, bool branch): the jump-label / static-key primitive behind
+// static_branch_(un)likely, tracepoints and DEBUG gates. Its real body is an `asm goto`, which the frontend cannot
+// lower, so each unit emits a bodyless declare the linker renames to arch_static_branch.uN -- hence its name is on
+// the `// hlir-extern:` line above, which unifies them into one external this body completes. Returns false: the
+// static-key-disabled (compiled-out) path, how the kernel runs tracepoints/debug by default. Skipping those
+// branches is sound for parse-path memory safety and stops the folded debug branches failing the opaque gate.
+core.func @arch_static_branch(ptr, bool) -> bool {
+^entry(%key: ptr, %branch: bool):
+  %c = core.const 0 : i32
+  %f = core.i2b %c : bool
+  core.return %f
+}
+
+// u32 crc32_be/crc32_le(u32 crc, const u8 *p, size_t len): CRC over `len` bytes of `p`. The checksum is never a
+// bound or index (mac80211 only compares elems->crc), so the value is nondet; but the function READS p[0..len), so
+// the model does a bounds-checked read of that range (catching a crc-over-bad-buffer OOB) rather than executing the
+// real byte loop over attacker data, which is a hot loop with lookup tables and pointless to run symbolically.
+// Ubiquitous (every CRC/FCS path); left opaque it fails the opaque_calls gate on any parser that checksums input.
+core.func @crc32_be(i32, ptr, i64) -> i32 {
+^entry(%crc: i32, %p: ptr, %len: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %len, %z : bool
+  core.cond_br %empty, ^out, ^read
+^read:
+  core.check.null %p
+  core.check.uaf %p
+  %one = core.const 1 : i64
+  %last = core.sub %len, %one : i64
+  core.check.ptr_arith %p, %last
+  %end = core.ptr_add %p, %last : ptr
+  core.check.oob %p {w=1, access="r", origin="crc32_be input start"}
+  core.check.oob %end {w=1, access="r", origin="crc32_be input end"}
+  core.br ^out
+^out:
+  %r = core.nondet {name="crc32_be"} : i32
+  core.return %r
+}
+core.func @crc32_le(i32, ptr, i64) -> i32 {
+^entry(%crc: i32, %p: ptr, %len: i64):
+  %r = core.call @crc32_be(%crc, %p, %len) : i32
+  core.return %r
+}
+
+// ssize_t sized_strscpy(char *dst, const char *src, size_t count): the kernel strscpy. Copies at most count bytes
+// (including the NUL) from src to dst, always NUL-terminates when count>0, and returns the copied length (< count)
+// on success or -E2BIG (-7) on truncation / count==0. Bounds mirror strlcpy; the write happens on both the whole
+// and the truncated path (the kernel fills dst either way), only the return differs.
+core.func @sized_strscpy(ptr, ptr, i64) -> i64 {
+^entry(%dst: ptr, %src: ptr, %count: i64):
+  %z = core.const 0 : i64
+  %nospace = core.icmp eq %count, %z : bool
+  core.cond_br %nospace, ^toobig, ^copy
+^copy:
+  core.check.null %dst
+  core.check.uaf %dst
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %one = core.const 1 : i64
+  %cap = core.sub %count, %one : i64
+  %fits = core.icmp ule %srclen, %cap : bool
+  core.cond_br %fits, ^whole, ^clipped
+^whole:
+  core.check.ptr_arith %dst, %srclen
+  %end1 = core.ptr_add %dst, %srclen : ptr
+  core.check.oob %dst {w=1, access="w", origin="sized_strscpy destination start"}
+  core.check.oob %end1 {w=1, access="w", origin="sized_strscpy terminator"}
+  core.memcpy %dst, %src, %srclen
+  %zb1 = core.const 0 : i8
+  core.store %zb1, %end1 {waived="checked above"}
+  core.return %srclen
+^clipped:
+  core.check.ptr_arith %dst, %cap
+  %end2 = core.ptr_add %dst, %cap : ptr
+  core.check.oob %dst {w=1, access="w", origin="sized_strscpy destination start"}
+  core.check.oob %end2 {w=1, access="w", origin="sized_strscpy terminator"}
+  core.memcpy %dst, %src, %cap
+  %zb2 = core.const 0 : i8
+  core.store %zb2, %end2 {waived="checked above"}
+  %e1 = core.const -7 : i64
+  core.return %e1
+^toobig:
+  %e2 = core.const -7 : i64
+  core.return %e2
+}

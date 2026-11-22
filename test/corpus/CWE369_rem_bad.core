@@ -1,0 +1,9 @@
+// EXPECT: div_by_zero
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%d: i32):
+  %hundred = core.const 100 : i32
+  core.check.div %hundred, %d
+  %r = core.srem %hundred, %d : i32
+  core.return %r
+}

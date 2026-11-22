@@ -1,0 +1,29 @@
+# Contracts of bzip2's internal Huffman routines (huffman.c). Their callers in compress.c / decompress.c guarantee these;
+# the functions themselves check nothing, which is why a scan with unconstrained parameters reports shifts of negative
+# frequencies, out-of-bounds writes for mismatched sizes, and so on.
+#   BZ_MAX_ALPHA_SIZE = 258, BZ_MAX_CODE_LEN = 23
+preconditions:
+  - function: BZ2_hbMakeCodeLengths
+    params:
+      alphaSize: { range: [1, 258] }
+      maxLen: { range: [1, 20] }
+      len: { size: { min: 258, max: 258 } }
+      freq: { size: { min: 1032, max: 1032 }, elements: { type: int32_t, range: [0, 8388607], count: alphaSize } }
+  - function: BZ2_hbAssignCodes
+    params:
+      minLen: { range: [1, 20] }
+      maxLen: { range: [1, 20] }
+      alphaSize: { range: [1, 258] }
+      code: { size: { min: 1032, max: 1032 } }
+      length: { size: { min: 258, max: 258 }, elements: { type: uint8_t, range: [1, 20], count: alphaSize } }
+    relations: [ "minLen <= maxLen" ]
+  - function: BZ2_hbCreateDecodeTables
+    params:
+      minLen: { range: [1, 20] }
+      maxLen: { range: [1, 20] }
+      alphaSize: { range: [1, 258] }
+      limit: { size: { min: 92, max: 92 } }
+      base: { size: { min: 92, max: 92 } }
+      perm: { size: { min: 1032, max: 1032 } }
+      length: { size: { min: 258, max: 258 }, elements: { type: uint8_t, range: [1, 20], count: alphaSize } }
+    relations: [ "minLen <= maxLen" ]

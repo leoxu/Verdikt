@@ -1,0 +1,24 @@
+// libwayland server API models written in `core` (hlir-scan --wayland). A wl_resource is modelled as an object whose first
+// 8 bytes hold its user data pointer; the scanner (see `hlir-user-data-getter` below) builds exactly that for handle
+// parameters, with the struct the code converts the user data to behind the pointer.
+// hlir-user-data-getter: wl_resource_get_user_data
+
+// void *wl_resource_get_user_data(struct wl_resource *resource)
+core.func @wl_resource_get_user_data(ptr) -> ptr {
+^entry(%r: ptr):
+  core.check.null %r
+  core.check.uaf %r
+  core.check.oob %r {w=8, access="r", origin="wl_resource_get_user_data"}
+  %d = core.load %r {waived="checked above"} : ptr
+  core.return %d
+}
+
+// void wl_resource_set_user_data(struct wl_resource *resource, void *data)
+core.func @wl_resource_set_user_data(ptr, ptr) -> void {
+^entry(%r: ptr, %d: ptr):
+  core.check.null %r
+  core.check.uaf %r
+  core.check.oob %r {w=8, access="w", origin="wl_resource_set_user_data"}
+  core.store %d, %r {waived="checked above"}
+  core.return
+}

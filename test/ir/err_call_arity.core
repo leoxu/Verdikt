@@ -1,0 +1,7 @@
+// ERROR: has 0 argument(s), expected 1
+core.declare @g(i32) -> void
+core.func @f() -> void {
+^entry:
+  core.call @g()
+  core.return
+}

@@ -1,0 +1,7 @@
+# The session constructor that performs UB on the way (DESIGN.md §22.368 §7). Its UB must not decide this entry.
+taint_entries:
+  - function: demo_sc_ioctl
+    setup: { function: demo_sc_open_ub, session_param: s, ctor_param: s, success: "ret == 0" }
+    params:
+      s:   { taint: none, kind: buffer, size: { min: 16, max: 16 } }
+      arg: { taint: value, type: uint64_t }

@@ -1,0 +1,48 @@
+# ModelDB additions for the Linux kernel (hlir-scan --linux). The checked models live in models/linux.core (copy_from_user,
+# kmalloc family, kfree, memdup_user ...). Put `override: true` models here when a header inline must be replaced by a
+# table-driven model instead.
+#
+# STRUCT LAYOUTS below are measured, not guessed: compiled with this tree's own command line out of
+# compile_commands.json (x86_64, linux-6.12.112 defconfig + the subsystem's options) by taking
+# `char probe[offsetof(struct buffer_head, b_data)]` and reading the symbol size back with nm.
+#   struct buffer_head: sizeof 104, b_blocknr 24, b_size 32, b_data 40
+# A different arch or config changes these, so they are stated here rather than inferred: a mismatch is then a
+# wrong number in one file instead of an invisible drift.
+
+models:
+  # struct buffer_head *__bread_gfp(struct block_device *, sector_t block, unsigned size, gfp_t gfp)
+  #
+  # THE function through which a block-backed filesystem sees the disk. `sb_bread`, `sb_bread_unmovable` and
+  # `__bread` are header inlines that all forward here, so this is the one place to say it.
+  #
+  # As an opaque external it returns a zeroed blob: `bh->b_data` reads NULL, and the parser either dies on a
+  # null_deref the harness invented or never runs at all. Measured on fs/isofs before this model (round 43):
+  # `isofs_readdir` 1% of blocks, `isofs_lookup` 1%, `rock_ridge_symlink_read_folio` 0%, `isofs_fill_super` 3%,
+  # 8 of 19 entries vacuously safe with `checks queried == 0`, and 4164 of 4242 uncovered edges `unreached`.
+  #
+  # The block's size is `arg2` -- the size the caller asked for, which for sb_bread is `sb->s_blocksize`. Stating
+  # it as the argument rather than a constant is what makes an overrun of the block a real finding: the pointee is
+  # bounded by the same number the filesystem itself believes, so reading past it is a fact about the parser and
+  # not about a size this model made up (contrast the synthesis frontier, §22.364, whose invented size has to
+  # suppress every bounds verdict it would otherwise produce).
+  #
+  # `may_fail` stays: __bread_gfp really does return NULL, and a filesystem that does not check is making a real
+  # mistake. The rest of the buffer_head is zero, `b_size` included -- see docs/MODEL_TODO.md, writing an integer
+  # at an offset of the returned object is not expressible yet, and code that loops on `bh->b_size` will see 0.
+  - function: __bread_gfp
+    returns: { alloc: { size: 104, zeroed: true, may_fail: true } }
+    points_to:
+      - { base: ret, offset: 40, size: arg2, source: disk }
+
+  # struct page *alloc_pages_noprof(gfp_t gfp, unsigned int order)  --  `alloc_page(gfp)` is order 0.
+  #
+  # Paired with the `lowmem_page_address` model above, which returns the page pointer itself: this object is
+  # therefore both the `struct page` and the 4096 bytes it describes (the conflation is argued there). 4096 and
+  # not `PAGE_SIZE << order` because `size:` has no shift -- for order > 0 this UNDER-allocates and could report
+  # an overrun on correct code, so it is deliberately restricted: see docs/MODEL_TODO.md, a `.core` body like
+  # get_free_pages_noprof's is the fix, and no isofs caller passes a non-zero order.
+  #
+  # Contents are left unconstrained rather than zeroed: nothing zeroes a page unless __GFP_ZERO was asked for,
+  # and a zero-filled page is the same specific-state mistake as a zero-filled session (§22.381).
+  - function: alloc_pages_noprof
+    returns: { alloc: { size: 4096, may_fail: true } }

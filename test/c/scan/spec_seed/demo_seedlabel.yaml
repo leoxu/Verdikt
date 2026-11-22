@@ -1,0 +1,5 @@
+taint_entries:
+  - function: demo_seedlabel
+    label: netmsg
+    params:
+      s: { taint: pointee, kind: buffer, size: { min: 6, max: 6 } }

@@ -1,0 +1,9 @@
+// EXPECT: uninit_read
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.alloca {size=4, align=4} : ptr
+  core.check.uninit %p {w=4}
+  %v = core.load %p : i32
+  core.return %v
+}

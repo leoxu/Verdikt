@@ -1,0 +1,6 @@
+// ERROR: use of undefined value %nope
+core.func @f(i32) -> i32 {
+^entry(%a: i32):
+  %r = core.add %a, %nope : i32
+  core.return %r
+}

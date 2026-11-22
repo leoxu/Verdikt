@@ -1,0 +1,2 @@
+# the attached spelling: `-c3` rather than `-c 3`. POSIX allows both and a parser that only handles one is wrong.
+argv: [ prog, -c3, -l/lib/x.so ]

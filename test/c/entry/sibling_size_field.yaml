@@ -1,0 +1,10 @@
+taint_entries:
+  - function: consume
+    label: network
+    params:
+      el:
+        taint: pointee
+        kind: buffer
+        size: { min: 16, max: 16 }
+        fields:
+          - { offset: 0, kind: buffer, taint: pointee, size: { from_field: { offset: 8, type: size_t } } }

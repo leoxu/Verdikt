@@ -1,0 +1,10 @@
+// EXPECT: null_deref
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %z = core.const 0 : i64
+  %p = core.int_to_ptr %z : ptr
+  core.check.null %p
+  %v = core.load %p : i32
+  core.return %v
+}

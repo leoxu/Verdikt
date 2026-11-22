@@ -1,0 +1,10 @@
+taint_entries:
+  - function: caller_a
+    label: network
+    params:
+      m:
+        taint: pointee
+        kind: buffer
+        size: { min: 16, max: 16 }
+        fields:
+          - { offset: 0, kind: buffer, taint: pointee, size: { min: 64, max: 64 } }

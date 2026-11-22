@@ -1,0 +1,14 @@
+// EXPECT: invalid_free
+// ENTRY: f
+// LIBC
+core.declare @malloc(i64) -> ptr
+core.declare @free(ptr) -> void
+core.declare @calloc(i64, i64) -> ptr
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.declare @memset(ptr, i32, i64) -> ptr
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.alloca {size=8} : ptr
+  core.call @free(%p)
+  core.return %x
+}

@@ -1,0 +1,6 @@
+// ERROR: does not produce a result
+core.func @f(ptr) -> void {
+^entry(%p: ptr):
+  %x = core.free %p
+  core.return
+}

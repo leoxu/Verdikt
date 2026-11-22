@@ -1,0 +1,24 @@
+// EXPECT: none
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%len: i32):
+  %max = core.const 256 : i32
+  %big = core.icmp sgt %len, %max : bool
+  core.cond_br %big, ^reject, ^go
+^reject:
+  %m2 = core.const -2 : i32
+  core.return %m2
+^go:
+  %zero = core.const 0 : i32
+  %isneg = core.icmp slt %len, %zero : bool
+  core.cond_br %isneg, ^rej, ^c2
+^rej:
+  %m1 = core.const -1 : i32
+  core.return %m1
+^c2:
+  %n = core.sext %len : i64
+  %lim = core.const 256 : i64
+  %ok = core.icmp ule %n, %lim : bool
+  core.assert %ok {msg="size exceeds buffer"}
+  core.return %len
+}

@@ -1,0 +1,14 @@
+// EXPECT: none
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 8 : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  %v0 = core.const 5 : i32
+  core.store %v0, %p
+  core.check.null %p
+  core.check.uaf %p
+  %v = core.load %p : i32
+  core.free %p
+  core.return %x
+}

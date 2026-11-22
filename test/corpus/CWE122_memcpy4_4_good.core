@@ -1,0 +1,26 @@
+// EXPECT: none
+// ENTRY: f
+// LIBC
+core.declare @malloc(i64) -> ptr
+core.declare @free(ptr) -> void
+core.declare @calloc(i64, i64) -> ptr
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.declare @memset(ptr, i32, i64) -> ptr
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 4 : i64
+  %c = core.const 4 : i64
+  %dst = core.call @malloc(%n) : ptr
+  %isn = core.is_null %dst : bool
+  core.cond_br %isn, ^ret, ^go
+^go:
+  %src = core.alloca {size=64} : ptr
+  %z = core.const 0 : i32
+  %big = core.const 64 : i64
+  %f0 = core.call @memset(%src, %z, %big) : ptr
+  %r = core.call @memcpy(%dst, %src, %c) : ptr
+  core.call @free(%dst)
+  core.br ^ret
+^ret:
+  core.return %x
+}

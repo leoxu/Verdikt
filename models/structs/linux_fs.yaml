@@ -1,0 +1,83 @@
+# What the mount path validated about the objects a filesystem handler is handed (DESIGN.md §22.480).
+#
+# Round 43's triage found that ELEVEN of twelve findings on fs/isofs were one sentence: a field `isofs_fill_super`
+# validates is unconstrained in the synthesised object (workspace/kernel/results/k59_isofs/triage_12.md). The
+# kernel does not assert these with BUG_ON -- it validates them with `goto out_bad_zone_size` -- so nothing
+# harvests them, and they have to be written down.
+#
+# EVERY ENTRY HERE NARROWS THE ANALYSIS. `why` is mandatory and cites the line that enforces the claim: a range
+# stated wider than the truth only loses findings, one stated narrower HIDES REAL ONES.
+#
+# SIZES AND OFFSETS are measured, not guessed: compiled with this tree's own command line out of
+# compile_commands.json (x86_64, linux-6.12.112 defconfig + the fs options) with
+# `char probe[offsetof(struct X, f)]`, read back with nm. They match what the lowering prints as
+# `pointee="super_block#1280"`. A different arch or config changes them, and the SIZE IS PART OF THE KEY, so a
+# mismatch makes the file silently inapplicable rather than silently wrong.
+
+version: 1
+
+structs:
+  - struct: super_block
+    size: 1280
+    # `s_fs_info` is `void *` in the type system and the filesystem's own state in every line that touches it.
+    # THIS ENTRY IS SUBSYSTEM-SPECIFIC in a way the ranges are not: it is a different type in every filesystem and
+    # the key cannot tell them apart, so a tree holding two filesystems would get isofs's type on both. It is
+    # named in every entry's assumptions for exactly that reason.
+    pointers:
+      - name: s_fs_info
+        offset: 872
+        struct: isofs_sb_info
+        size: 80
+        why: "fs/isofs/isofs.h ISOFS_SB(sb) casts it; without the retype s_log_zone_size is unreachable and the block-pointer reads at fs/isofs/compress.c:248,262 leave the buffer"
+    fields:
+      # `sb_min_blocksize(s, opt->blocksize)` with the device's logical block size rejected above 2048
+      # (fs/isofs/inode.c:606), and a VFS blocksize is a power of two. An `enum` and not a range because the
+      # directory walk relies on the POWER OF TWO, not on the magnitude: `offset &= bufsize - 1`
+      # (fs/isofs/namei.c:83) only normalises when it is one, and a range [512, 2048] does not say that.
+      - name: s_blocksize
+        offset: 24
+        bits: 64
+        enum: [512, 1024, 2048]
+        why: "fs/isofs/inode.c:606,612 sb_min_blocksize with bdev_logical_block_size <= 2048; a VFS blocksize is a power of two"
+
+  - struct: inode
+    size: 592
+    fields:
+      # log2 of the blocksize above, so the same three values.
+      - name: i_blkbits
+        offset: 134
+        bits: 8
+        enum: [9, 10, 11]
+        why: "log2 of s_blocksize, which fs/isofs/inode.c:746 restricts to 512/1024/2048"
+
+  - struct: isofs_sb_info
+    size: 80
+    fields:
+      # The on-disk logical block size is read, then CONVERTED to a bit shift by a switch whose default is
+      # `goto out_bad_zone_size` (fs/isofs/inode.c:746-752). After mount it is 9, 10 or 11 and nothing else.
+      - name: s_log_zone_size
+        offset: 24
+        bits: 64
+        enum: [9, 10, 11]
+        why: "fs/isofs/inode.c:746-752 switch converts 512/1024/2048 to 9/10/11 and its default goes to out_bad_zone_size"
+      # -1 until an SP entry is seen (inode.c:841), then `rr->u.SP.skip`, which is one byte off the disk
+      # (rock.c:49). Attacker-chosen within that, which is why the bound is the TYPE's and not something tighter:
+      # this entry removes the pointer-into-nowhere artefact without claiming the value is trusted.
+      - name: s_rock_offset
+        offset: 40
+        bits: 32
+        signed: true
+        range: [-1, 255]
+        why: "fs/isofs/inode.c:841 sets -1; fs/isofs/rock.c:49 sets it from rr->u.SP.skip, a u8 off the disk"
+
+  - struct: iso_inode_info
+    size: 640
+    fields:
+      # Where this inode's own directory record sat inside its block, so below the blocksize by construction --
+      # isofs_iget is only ever called with an offset the directory walk produced. The bound is the largest
+      # blocksize, not the actual one, because the two are not related by anything stated here.
+      - name: i_iget5_offset
+        offset: 8
+        bits: 64
+        range: [0, 2047]
+        why: "set from the directory walk's own offset within a block (fs/isofs/inode.c isofs_iget callers); a block is at most 2048"

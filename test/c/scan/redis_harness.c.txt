@@ -1,0 +1,131 @@
+/* Redis parsers of untrusted bytes, driven the way Redis drives them: real constructors, tainted payloads, then the real consumers. */
+#include <stdlib.h>
+#include <string.h>
+#include "sds.h"
+#include "listpack.h"
+#include "ziplist.h"
+#include "intset.h"
+#include "lzf.h"
+#include "util.h"
+
+/* allocator shims (zmalloc.c itself is not linked). Redis's allocator never returns NULL: out of memory is fatal. */
+static void *xm(size_t n) { void *p = malloc(n ? n : 1); if (!p) abort(); return p; }
+static void *xc(size_t n) { void *p = calloc(1, n ? n : 1); if (!p) abort(); return p; }
+static void *xr(void *q, size_t n) { void *p = realloc(q, n); if (!p && n) abort(); return p; }
+void *zmalloc(size_t n) { return xm(n); }
+void *zcalloc(size_t n) { return xc(n); }
+void *zcalloc_num(size_t a, size_t b) { return xc(a * b); }
+void *zrealloc(void *p, size_t n) { return xr(p, n); }
+void *ztrymalloc(size_t n) { return xm(n); }
+void *ztrycalloc(size_t n) { return xc(n); }
+void *ztryrealloc(void *p, size_t n) { return xr(p, n); }
+void zfree(void *p) { free(p); }
+void *zmalloc_usable(size_t n, size_t *u) { if (u) *u = n; return xm(n); }
+void *zcalloc_usable(size_t n, size_t *u) { if (u) *u = n; return xc(n); }
+void *zrealloc_usable(void *p, size_t n, size_t *u) { if (u) *u = n; return xr(p, n); }
+void *ztrymalloc_usable(size_t n, size_t *u) { if (u) *u = n; return xm(n); }
+void *ztrycalloc_usable(size_t n, size_t *u) { if (u) *u = n; return xc(n); }
+void *ztryrealloc_usable(void *p, size_t n, size_t *u) { if (u) *u = n; return xr(p, n); }
+void zfree_usable(void *p, size_t *u) { free(p); }
+
+/* RESTORE / RDB load: a serialized listpack arrives as raw bytes, the validator runs, then the data structure is used */
+int fuzz_lp_validate(const unsigned char *data, size_t n) {
+	unsigned char *lp = malloc(n);
+	if (!lp) return 0;
+	memcpy(lp, data, n);
+	int ok = lpValidateIntegrity(lp, n, 1, NULL, NULL);
+	int r = 0;
+	if (ok) {
+		unsigned char *p = lpFirst(lp);
+		unsigned char ib[LP_INTBUF_SIZE];
+		int64_t v;
+		while (p) {
+			lpGet(p, &v, ib);
+			r ^= (int)(v & 0xff);
+			p = lpNext(lp, p);
+		}
+		r += (int)lpLength(lp);
+	}
+	free(lp);
+	return r;
+}
+int fuzz_ziplist_validate(const unsigned char *data, size_t n) {
+	unsigned char *zl = malloc(n);
+	if (!zl) return 0;
+	memcpy(zl, data, n);
+	int ok = ziplistValidateIntegrity(zl, n, 1, NULL, NULL);
+	int r = 0;
+	if (ok) {
+		unsigned char *p = ziplistIndex(zl, 0);
+		unsigned char *sval;
+		unsigned int slen;
+		long long lval;
+		while (p) {
+			if (ziplistGet(p, &sval, &slen, &lval) && sval) r ^= sval[0];
+			p = ziplistNext(zl, p);
+		}
+		r += (int)ziplistLen(zl);
+	}
+	free(zl);
+	return r;
+}
+int fuzz_intset_validate(const unsigned char *data, size_t n) {
+	unsigned char *is = malloc(n);
+	if (!is) return 0;
+	memcpy(is, data, n);
+	int ok = intsetValidateIntegrity(is, n, 1);
+	int r = 0;
+	if (ok) {
+		int64_t v;
+		for (uint32_t i = 0; i < intsetLen((intset *)is); i++)
+			if (intsetGet((intset *)is, i, &v)) r ^= (int)(v & 0xff);
+		r += intsetFind((intset *)is, 7);
+	}
+	free(is);
+	return r;
+}
+/* LZF-compressed RDB strings */
+int fuzz_lzf(const unsigned char *in, unsigned n, unsigned outlen) {
+	if (outlen == 0 || outlen > 256) return 0;
+	unsigned char *out = malloc(outlen);
+	if (!out) return 0;
+	unsigned r = lzf_decompress(in, n, out, outlen);
+	free(out);
+	return (int)r;
+}
+/* KEYS / SCAN patterns: the pattern and the subject are exact-size heap buffers, not NUL terminated */
+int fuzz_match(const char *d, size_t dlen, int plen, int nocase) {
+	if (plen < 0 || (size_t)plen > dlen) return 0;
+	int slen = (int)(dlen - (size_t)plen);
+	char *p = malloc(plen ? plen : 1), *s = malloc(slen ? slen : 1);
+	if (!p || !s) return 0;
+	memcpy(p, d, plen);
+	memcpy(s, d + plen, slen);
+	int r = stringmatchlen(p, plen, s, slen, nocase);
+	free(p);
+	free(s);
+	return r;
+}
+/* inline commands: the line arrives NUL terminated */
+int fuzz_splitargs(const char *line) {
+	int argc = 0;
+	sds *argv = sdssplitargs(line, &argc);
+	int r = 0;
+	if (argv) {
+		for (int i = 0; i < argc; i++) r += (int)sdslen(argv[i]);
+		sdsfreesplitres(argv, argc);
+	}
+	return r;
+}
+/* sds string operations on an attacker-sized string with attacker-chosen ranges */
+int fuzz_sds(const char *d, size_t n, long a, long b) {
+	sds s = sdsnewlen(d, n);
+	sdsrange(s, a, b);
+	sds t = sdscatlen(sdsempty(), s, sdslen(s));
+	t = sdscatlen(t, d, n);
+	sdstrim(t, "ab");
+	int r = (int)sdslen(t);
+	sdsfree(t);
+	sdsfree(s);
+	return r;
+}

@@ -1,0 +1,22 @@
+// EXPECT: invalid_free
+// ENTRY: f
+// LIBC
+core.declare @malloc(i64) -> ptr
+core.declare @free(ptr) -> void
+core.declare @calloc(i64, i64) -> ptr
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.declare @memset(ptr, i32, i64) -> ptr
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 8 : i64
+  %p = core.call @malloc(%n) : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^ret, ^go
+^go:
+  %four = core.const 4 : i64
+  %q = core.ptr_add %p, %four : ptr
+  core.call @free(%q)
+  core.br ^ret
+^ret:
+  core.return %x
+}

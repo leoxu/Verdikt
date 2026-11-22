@@ -1,0 +1,8 @@
+// ERROR: block expects i32
+core.func @f() -> void {
+^entry:
+  %a = core.const 1 : i64
+  core.br ^b(%a)
+^b(%x: i32):
+  core.return
+}

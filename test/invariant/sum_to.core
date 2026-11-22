@@ -1,0 +1,37 @@
+// linked from: test/invariant/sum_to.c
+core.func @sum_to(i32) -> i32 {
+^entry(%n: i32):
+  %v0 = core.alloca {size=4, align=4, name="n"} : ptr loc("test/invariant/sum_to.c":1:5)
+  core.store %n, %v0 {waived="object known"} loc("test/invariant/sum_to.c":1:5)
+  %v1 = core.alloca {size=4, align=4, name="i"} : ptr loc("test/invariant/sum_to.c":3:11)
+  %c2 = core.const 0 : i32 loc("test/invariant/sum_to.c":3:15)
+  core.store %c2, %v1 {waived="object known"} loc("test/invariant/sum_to.c":3:15)
+  %v3 = core.alloca {size=4, align=4, name="acc"} : ptr loc("test/invariant/sum_to.c":4:11)
+  %c4 = core.const 0 : i32 loc("test/invariant/sum_to.c":4:17)
+  core.store %c4, %v3 {waived="object known"} loc("test/invariant/sum_to.c":4:17)
+  core.br ^while1 loc("test/invariant/sum_to.c":6:2)
+^while1:
+  core.check.uninit %v1 {w=4} loc("test/invariant/sum_to.c":6:9)
+  %l5 = core.load %v1 {waived="object known"} : i32 loc("test/invariant/sum_to.c":6:9)
+  core.check.uninit %v0 {w=4} loc("test/invariant/sum_to.c":6:13)
+  %l6 = core.load %v0 {waived="object known"} : i32 loc("test/invariant/sum_to.c":6:13)
+  %t7 = core.icmp ult %l5, %l6 : bool loc("test/invariant/sum_to.c":6:13)
+  core.cond_br %t7, ^body2, ^endwhile3 loc("test/invariant/sum_to.c":6:13)
+^body2:
+  core.check.uninit %v3 {w=4} loc("test/invariant/sum_to.c":7:3)
+  %l8 = core.load %v3 {waived="object known"} : i32 loc("test/invariant/sum_to.c":7:3)
+  core.check.uninit %v1 {w=4} loc("test/invariant/sum_to.c":7:10)
+  %l9 = core.load %v1 {waived="object known"} : i32 loc("test/invariant/sum_to.c":7:10)
+  %t10 = core.add %l8, %l9 : i32 loc("test/invariant/sum_to.c":7:10)
+  core.store %t10, %v3 {waived="object known"} loc("test/invariant/sum_to.c":7:10)
+  core.check.uninit %v1 {w=4} loc("test/invariant/sum_to.c":8:3)
+  %l11 = core.load %v1 {waived="object known"} : i32 loc("test/invariant/sum_to.c":8:3)
+  %c12 = core.const 1 : i32 loc("test/invariant/sum_to.c":8:3)
+  %t13 = core.add %l11, %c12 : i32 loc("test/invariant/sum_to.c":8:3)
+  core.store %t13, %v1 {waived="object known"} loc("test/invariant/sum_to.c":8:3)
+  core.br ^while1 loc("test/invariant/sum_to.c":8:3)
+^endwhile3:
+  core.check.uninit %v3 {w=4} loc("test/invariant/sum_to.c":10:14)
+  %l14 = core.load %v3 {waived="object known"} : i32 loc("test/invariant/sum_to.c":10:14)
+  core.return %l14 loc("test/invariant/sum_to.c":10:14)
+}

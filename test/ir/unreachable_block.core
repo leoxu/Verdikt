@@ -1,0 +1,9 @@
+// Dominance is not enforced inside unreachable blocks.
+core.func @u() -> i32 {
+^entry:
+  %a = core.const 1 : i32
+  core.return %a
+^dead:
+  %b = core.add %a, %a : i32
+  core.return %b
+}

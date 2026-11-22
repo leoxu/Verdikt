@@ -1,0 +1,7 @@
+// ERROR: duplicate switch case value
+core.func @f(i32) -> void {
+^entry(%v: i32):
+  core.switch %v [1: ^a, 1: ^a] default ^a
+^a:
+  core.return
+}

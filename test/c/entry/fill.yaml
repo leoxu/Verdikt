@@ -1,0 +1,7 @@
+taint_entries:
+  - function: fill
+    label: network
+    params:
+      dst: { taint: none,    kind: buffer, size: { min: 1,  max: 16 } }
+      src: { taint: pointee, kind: buffer, size: { min: 17, max: 64 } }
+      n:   { taint: value,   type: unsigned }

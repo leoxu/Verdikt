@@ -1,0 +1,31 @@
+core.func @arith(i32, i64, bool) -> i32 {
+^entry(%a: i32, %b: i64, %c: bool):
+  %k = core.const 10 : i32
+  %n = core.const -3 : i32
+  %t = core.const true : bool
+  %s = core.add %a, %k : i32
+  %d = core.sub %s, %n : i32
+  %m = core.mul %d, %k : i32
+  %q = core.neg %m : i32
+  %x = core.xor %q, %k : i32
+  %y = core.not %x : i32
+  %z = core.and %y, %k : i32
+  %o = core.or %z, %k : i32
+  %cmp = core.icmp slt %o, %k : bool
+  %bb = core.and %cmp, %c : bool
+  %nb = core.not %bb : bool
+  %sel = core.select %nb, %o, %a : i32
+  %w = core.sext %sel : i64
+  %w2 = core.zext %sel : i64
+  %sum = core.add %w, %w2 : i64
+  %sum2 = core.add %sum, %b : i64
+  %lo = core.trunc %sum2 : i16
+  %ex = core.extract %sum2 {hi=15, lo=8} : i8
+  %cc = core.concat %ex, %ex : i16
+  %e16 = core.xor %lo, %cc : i16
+  %ze = core.zext %e16 : i32
+  %bi = core.b2i %t : i32
+  %ib = core.i2b %bi : bool
+  %r = core.select %ib, %ze, %bi : i32
+  core.return %r
+}

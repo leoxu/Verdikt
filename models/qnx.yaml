@@ -1,0 +1,176 @@
+# QNX Neutrino resource-manager API: the declarative half of the models (hlir-scan --qnx; models/qnx.core is the
+# other half, for the two routines whose behaviour needs real control flow).
+#
+# Every function here lives in the QNX SDP's libc / libio-util, not in the sources being scanned. Without a model
+# each one is an opaque external: it returns an unconstrained value and -- the part that matters -- is assumed to
+# leave every buffer it was handed exactly as it found it. For this particular API that assumption is not neutral.
+# `main` hands `iofunc_attr_init` a zeroed attribute structure and the library fills it in; assuming otherwise
+# leaves the structure zero for the whole scan, every handler that reads `ocb->attr->...` sees zeros, and the
+# scanner reports `safe` about code it never really exercised. That is the measured failure (DESIGN.md §22.373)
+# this file exists to end, and `fills_unknown` (§22.377) is what makes it statable: these functions write bytes
+# we cannot name, so the bytes are unknown and belong to nobody -- not to the attacker (`source` would be), and
+# not to a value we made up (`fill` would be).
+#
+# SIZES are from the QNX 8.0 SDP (qnx800-ga1-sdp_804_v1), target aarch64le, read off clang's own record layouts
+# of <sys/iofunc.h>, <sys/resmgr.h> and <sys/dispatch.h> -- not guessed:
+#   iofunc_attr_t 128   iofunc_ocb_t 32   iofunc_mount_t 80   resmgr_context_t 152
+#   resmgr_io_funcs_t 272   resmgr_connect_funcs_t 80   resmgr_attr_t 40   dispatch_context_t 152
+# A different SDP or a 32-bit target changes these. They are stated here rather than inferred so that a mismatch
+# is a wrong number in one file, not an invisible drift.
+
+models:
+  # void iofunc_attr_init_sized(iofunc_attr_t *attr, mode_t mode, iofunc_attr_t *dattr, _client_info *info, size_t size)
+  # void iofunc_attr_init(...)   -- a macro that forwards to the _sized form with sizeof(iofunc_attr_t)
+  #
+  # Fills the caller's attribute structure: mount pointer, mode, uid/gid, times, link count, nbytes. The module
+  # then keeps that structure for the life of the resource manager and every OCB points at it. We do not model
+  # WHAT goes in (it depends on the mount, the client's credentials and the clock); we model THAT it is written.
+  - function: iofunc_attr_init_sized
+    fills_unknown: [ { ptr: arg0, size: 128 } ]
+  - function: iofunc_attr_init
+    fills_unknown: [ { ptr: arg0, size: 128 } ]
+
+  # void iofunc_func_init(unsigned nconnect, resmgr_connect_funcs_t *connect, unsigned nio, resmgr_io_funcs_t *io)
+  #
+  # Installs the library's default handlers in both tables. The module overwrites the slots it implements right
+  # after. Modelled so the tables do not stay full of NULLs: a table of null function pointers is a claim that
+  # the module left every unimplemented operation unhandled, which it did not.
+  - function: iofunc_func_init
+    fills_unknown:
+      - { ptr: arg1, size: 80 }
+      - { ptr: arg3, size: 272 }
+
+  # int resmgr_attach(dispatch_t *dpp, resmgr_attr_t *attr, const char *path, enum _file_type type,
+  #                   unsigned flags, const resmgr_connect_funcs_t *cf, const resmgr_io_funcs_t *iof, void *handle)
+  #
+  # Registers the path. Returns a non-negative id, or -1. Both outcomes are kept: `main` normally checks for -1
+  # and exits, and that is a real path. The concolic default is a success (1) so that a run with no seed gets
+  # past it and the rest of the initialiser actually executes -- the symbolic pass can still flip it.
+  - function: resmgr_attach
+    returns: { nondet: { min: -1, max: 1024, default: 1 } }
+
+  # dispatch_t *dispatch_create(void) / *dispatch_create_channel(int chid, unsigned flags)
+  #
+  # The dispatch handle is opaque (`struct _dispatch` has no public definition), and no module in this tree
+  # dereferences it -- it is passed back to resmgr_attach / dispatch_block. A 4096-byte object stands in for it.
+  # `may_fail` is kept: a module that does not check for NULL here is making a real mistake.
+  - function: dispatch_create
+    returns: { alloc: { size: 4096, zeroed: true, may_fail: true } }
+  - function: dispatch_create_channel
+    returns: { alloc: { size: 4096, zeroed: true, may_fail: true } }
+
+  # dispatch_context_t *dispatch_context_alloc(dispatch_t *dpp)
+  #
+  # Unlike the dispatch handle this one IS dereferenced -- `ctp->rcvid`, `ctp->info`, `ctp->msg` are read all over
+  # a resource manager's loop -- and its size is public, so it gets the real 152 bytes and unknown contents.
+  # Zeroing it instead would assert `rcvid == 0` ("nobody is waiting"), which is a state the loop never runs in.
+  - function: dispatch_context_alloc
+    returns: { alloc: { size: 152, may_fail: true } }
+    fills_unknown: [ { ptr: ret, size: 152 } ]
+
+  # int procmgr_daemon(int status, unsigned flags)
+  #
+  # Detaches from the controlling terminal. No memory effect on anything the caller owns; it can fail.
+  - function: procmgr_daemon
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # int clock_gettime(clockid_t clock_id, struct timespec *tp)
+  #
+  # Reference: openqnx trunk/lib/c/1b/clock_gettime.c -> nsec2timespec(tp, _syspage_time(clock_id)), return 0.
+  # The ONLY caller-visible effect is that it INITIALISES *tp (tv_sec + tv_nsec, 16 bytes on 64-bit). Left
+  # opaque it is not written, so a later __timespec2nsec(tp) reads uninitialised memory -- the uninit_read
+  # artifact seen in <driver>'s read/devctl handlers. The wall-clock value is genuinely nondeterministic, so the
+  # 16 bytes are unknown-but-defined. It can fail (returns -1) only when the clock id is unknown.
+  - function: clock_gettime
+    fills_unknown: [ { ptr: arg1, size: 16 } ]
+    # Every <driver> call uses CLOCK_MONOTONIC, which the reference never fails on (-1 is returned only for an
+    # unknown clock_id). Pinning the return to 0 avoids exploring an error branch the real clock never takes --
+    # that branch otherwise reaches <DRIVER>_MACRO and manufactures a null_deref on unconstrained logging state.
+    returns: { nondet: { min: 0, max: 0, default: 0 } }
+
+  # ssize_t resmgr_msgwrite(resmgr_context_t *ctp, const void *msg, size_t nbytes, size_t offset)
+  #
+  # Reference: openqnx trunk/lib/c/resmgr/resmgr_msgwrite.c -> MsgWrite(ctp->rcvid, msg, nbytes, offset).
+  # Copies nbytes FROM the server's `msg` (a const INPUT) TO the client's reply. It writes nothing the handler
+  # later reads -- the bytes go to the client -- so there is no fills_unknown here; modelling it only removes the
+  # opaque default (which would otherwise invent writes/returns). It returns the byte count, or -1 on error; a
+  # handler that checks `status < 0` must see both edges.
+  - function: resmgr_msgwrite
+    returns: { nondet: { min: -1, max: 65535, default: 0 } }
+
+  # ---- generic resmgr/iofunc framework, reusable across every module (openqnx trunk/lib/c) ----
+
+  # int resmgr_msgread(resmgr_context_t *ctp, void *msg, int nbytes, int offset)
+  #   -> MsgRead(ctp->rcvid, msg, nbytes, ...): reads nbytes of CLIENT data INTO msg (arg1). The dual of
+  #   resmgr_msgwrite and the second attacker-data entry point (a handler calls it to pull a payload bigger
+  #   than the received header). The bytes are attacker-controlled, so they are a TAINTED source, sized by the
+  #   nbytes argument. Returns the count read, or -1.
+  - function: resmgr_msgread
+    source: { label: input, ptr: arg1, size: arg2 }
+    returns: { nondet: { min: -1, max: arg2, default: arg2 } }
+  - function: resmgr_msgreadv
+    source: { label: input, ptr: arg1, size: arg2 }
+    returns: { nondet: { min: -1, max: arg2, default: arg2 } }
+
+  # int iofunc_client_info(resmgr_context_t *ctp, int ioflag, struct _client_info *info)
+  #   -> ConnectClientInfo_r(..., info, ...): fills the 76-byte _client_info at arg2 with the client's
+  #   credentials (uid/gid/pid), then may swap real/effective ids. The handler reads info->cred for access
+  #   checks; the values are the client's identity (unknown here), so the struct is filled-unknown. Can fail.
+  - function: iofunc_client_info
+    fills_unknown: [ { ptr: arg2, size: 76 } ]
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+  - function: iofunc_client_info_ext
+    fills_unknown: [ { ptr: arg2, size: 76 } ]
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # int iofunc_check_access(resmgr_context_t *ctp, const iofunc_attr_t *attr, mode_t checkmode,
+  #                         const struct _client_info *info) -- a pure permission decision, no caller memory.
+  - function: iofunc_check_access
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # int iofunc_notify(resmgr_context_t *ctp, io_notify_t *msg, iofunc_notify_t *nop, int trig, ...)
+  #   Manages the per-attr notification list (malloc + linked list of its own bookkeeping). It touches only
+  #   library state the handler does not read as a bound/length; the caller uses the return. Can fail.
+  - function: iofunc_notify
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # int iofunc_unblock_default(...) / iofunc_unblock(...) -- unblock a pulse; no caller memory effect.
+  - function: iofunc_unblock_default
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # int iofunc_attr_lock(iofunc_attr_t *attr) / iofunc_attr_unlock(...) -- take/release the per-attr mutex.
+  #   HLIR is single-threaded so there is no lock state to track; the only caller-visible effect is the int
+  #   status, which the handlers check for success. Pin it to 0 (success) so the normal path runs; an opaque
+  #   default would fork a spurious failure branch into the logging/error machinery.
+  - function: iofunc_attr_lock
+    returns: { value: 0 }
+  - function: iofunc_attr_unlock
+    returns: { value: 0 }
+
+  # int resmgr_msgreply(resmgr_context_t *ctp, void *ptr, size_t len) -- MsgReply to the client. The dual of
+  #   resmgr_msgwrite: the bytes go OUT to the client, nothing the handler later reads, so no fills. Returns the
+  #   count or -1; a handler checking `< 0` must see both edges.
+  - function: resmgr_msgreply
+    returns: { nondet: { min: -1, max: 65535, default: 0 } }
+
+  # int ConnectAttach_r(nd, pid, chid, index, flags) -- open an IPC connection, returns a coid (>=0) or -errno.
+  # int ConnectDetach_r(int coid)                     -- close it, returns 0 or -errno.
+  #   No caller memory effect; the handler uses the return. Defaults chosen to run the success path.
+  - function: ConnectAttach_r
+    returns: { nondet: { min: -1, max: 1024, default: 1 } }
+  - function: ConnectDetach_r
+    returns: { nondet: { min: -1, max: 0, default: 0 } }
+
+  # void atomic_add/clr/set/sub(volatile unsigned *loc, unsigned v) -- the PUBLIC <atomic.h> externs (distinct
+  #   from the llsc_/lse_ inlines that models/overrides/qnx_atomic.h replaces: that file only supplies the CPU
+  #   header's inlines; these four are declared `extern` and live in libc). Each does *loc = *loc OP v. Left
+  #   opaque the location is never written, so a flag/refcount read after it is uninitialised. Model the write as
+  #   unknown-but-defined (the result depends on the prior value, which we do not track); no return.
+  - function: atomic_add
+    fills_unknown: [ { ptr: arg0, size: 4 } ]
+  - function: atomic_clr
+    fills_unknown: [ { ptr: arg0, size: 4 } ]
+  - function: atomic_set
+    fills_unknown: [ { ptr: arg0, size: 4 } ]
+  - function: atomic_sub
+    fills_unknown: [ { ptr: arg0, size: 4 } ]

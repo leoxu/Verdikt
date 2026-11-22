@@ -1,0 +1,3 @@
+skip:
+  - function: ext_log
+    reason: logging; writes nothing the caller owns and returns nothing

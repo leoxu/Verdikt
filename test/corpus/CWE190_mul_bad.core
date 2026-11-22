@@ -1,0 +1,9 @@
+// EXPECT: signed_overflow
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %k = core.const 100000 : i32
+  core.check.smul_ovf %x, %k
+  %r = core.mul %x, %k {sov} : i32
+  core.return %r
+}

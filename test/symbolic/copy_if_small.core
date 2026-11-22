@@ -1,0 +1,40 @@
+// DESIGN.md §19.9 example 1: `int -> size_t` sign extension.
+//   @copy_unchecked : the `len < 0` check was removed; a negative len sign-extends to a huge size.
+//   @copy_checked   : the check is present, the assertion can never fail.
+core.func @copy_unchecked(i32) -> i32 {
+^entry(%len: i32):
+  %max = core.const 256 : i32
+  %big = core.icmp sgt %len, %max : bool
+  core.cond_br %big, ^reject, ^copy
+^reject:
+  %m2 = core.const -2 : i32
+  core.return %m2
+^copy:
+  %n = core.sext %len : i64
+  %lim = core.const 256 : i64
+  %ok = core.icmp ule %n, %lim : bool
+  core.assert %ok {msg="copy size exceeds buffer"} loc("copy.c":13:5)
+  core.return %len
+}
+core.func @copy_checked(i32) -> i32 {
+^entry(%len: i32):
+  %zero = core.const 0 : i32
+  %neg = core.icmp slt %len, %zero : bool
+  core.cond_br %neg, ^reject1, ^c2
+^c2:
+  %max = core.const 256 : i32
+  %big = core.icmp sgt %len, %max : bool
+  core.cond_br %big, ^reject2, ^copy
+^reject1:
+  %m1 = core.const -1 : i32
+  core.return %m1
+^reject2:
+  %m2 = core.const -2 : i32
+  core.return %m2
+^copy:
+  %n = core.sext %len : i64
+  %lim = core.const 256 : i64
+  %ok = core.icmp ule %n, %lim : bool
+  core.assert %ok {msg="copy size exceeds buffer"} loc("copy.c":13:5)
+  core.return %len
+}

@@ -1,0 +1,78 @@
+# Call-contract models for ALSA's own dispatch interfaces (DESIGN.md §22.357). Kept apart from linux.yaml because
+# these are ONE SUBSYSTEM's tables, not kernel-wide ones: `struct ioctl_handler` in particular is a file-local tag in
+# sound/core/seq/seq_clientmgr.c, and the model library is keyed by struct TAG. If another subsystem ever defines its
+# own `struct ioctl_handler` with a different `func` signature, this model would be applied to it as well -- the
+# arity check (hlir::scan::makeEntry) drops the contract whole in that case and says so in a note, so the failure is
+# loud rather than a silently mislabelled parameter list, but the tag collision is real and worth knowing about.
+#
+# Roles: see models/interfaces/linux.yaml for the closed vocabulary.
+
+version: 1
+
+interfaces:
+  # sound/core/seq/seq_clientmgr.c:
+  #   static const struct ioctl_handler { unsigned int cmd; int (*func)(struct snd_seq_client *, void *arg); }
+  #   ioctl_handlers[] = { { SNDRV_SEQ_IOCTL_PVERSION, snd_seq_ioctl_pversion }, ... };
+  #
+  # The second-level dispatch of the sequencer's ioctl. What makes it worth modelling is that `arg` is NOT a __user
+  # pointer: the dispatcher (snd_seq_ioctl) has already done
+  #
+  #     size = _IOC_SIZE(handler->cmd);
+  #     if (handler->cmd & IOC_IN) copy_from_user(&buf, (const void __user *)arg, size);
+  #     err = handler->func(client, &buf);
+  #
+  # so what the handler is handed is a zeroed, kernel-side `union` of every sequencer ioctl payload, filled from
+  # userspace. That is `value` on a pointer: a legal kernel object whose CONTENTS are the attacker's. Generic
+  # synthesis would already model it that way -- the contract's work here is `client`, which generic synthesis
+  # would have invented field by field and tainted, and which is really the session the sequencer built in
+  # snd_seq_open.
+  #
+  # Not stated, deliberately: the dispatcher memsets `buf` and only copies `_IOC_SIZE(cmd)` bytes into it, so for
+  # any one command the tail of the union is zero rather than attacker data. That is a per-command fact, not an
+  # interface fact, and this vocabulary cannot say it -- so the model stays with the wider (and sound) reading.
+  - interface: seq_ioctl_handler
+    struct: ioctl_handler
+    label: untrusted
+    slots:
+      func:
+        params:
+          client: { role: kernel_owned }
+          arg:    { role: value }
+
+  # include/sound/seq_kernel.h: struct snd_seq_port_callback -- what a sequencer port exposes to the core.
+  #
+  # `private_data` is the port owner's state, created when the port was created and freed by `private_free`. There
+  # is no constructor SLOT to call (ports are created through snd_seq_create_port, not through this table), so it is
+  # declared kernel_owned outright rather than as a session that degrades to one: declaring a session whose ctor
+  # does not exist would put a promise in the report that nothing can ever keep.
+  #
+  # `ev` (snd_seq_event) and `info` (snd_seq_port_subscribe) both arrive from userspace through the sequencer's
+  # ioctl/write paths, so their contents are attacker-controlled. `direct`, `atomic` and `hop` are chosen by the
+  # sequencer core, not by the attacker -- untainted, but NOT fixed to a value (the core picks among several).
+  - interface: snd_seq_port_callback
+    struct: snd_seq_port_callback
+    label: untrusted
+    slots:
+      subscribe:
+        params:
+          private_data: { role: kernel_owned }
+          info:         { role: value }
+      unsubscribe:
+        params:
+          private_data: { role: kernel_owned }
+          info:         { role: value }
+      use:
+        params:
+          private_data: { role: kernel_owned }
+          info:         { role: value }
+      unuse:
+        params:
+          private_data: { role: kernel_owned }
+          info:         { role: value }
+      event_input:
+        params:
+          ev:           { role: value }
+          direct:       { role: kernel_owned }
+          private_data: { role: kernel_owned }
+          atomic:       { role: kernel_owned }
+          hop:          { role: kernel_owned }

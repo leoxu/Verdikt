@@ -1,0 +1,126 @@
+// linked from: test/wp/interproc.c
+core.func @clamp3(i32) -> i32 {
+^entry(%x: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/interproc.c":7:10)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/interproc.c":7:10)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":7:39)
+  %l1 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":7:39)
+  %c2 = core.const 7 : i32 loc("test/wp/interproc.c":7:43)
+  %t3 = core.and %l1, %c2 : i32 loc("test/wp/interproc.c":7:43)
+  core.return %t3 loc("test/wp/interproc.c":7:43)
+}
+core.func @ident(i32) -> i32 {
+^entry(%x: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/interproc.c":8:10)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/interproc.c":8:10)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":8:39)
+  %l1 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":8:39)
+  core.return %l1 loc("test/wp/interproc.c":8:39)
+}
+core.func @clamp15(i32) -> i32 {
+^entry(%x: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/interproc.c":9:10)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/interproc.c":9:10)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":9:39)
+  %l1 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":9:39)
+  %c2 = core.const 15 : i32 loc("test/wp/interproc.c":9:43)
+  %t3 = core.and %l1, %c2 : i32 loc("test/wp/interproc.c":9:43)
+  core.return %t3 loc("test/wp/interproc.c":9:43)
+}
+core.func @maybe(i32, i32) -> i32 {
+^entry(%x: i32, %f: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/interproc.c":10:10)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/interproc.c":10:10)
+  %v1 = core.alloca {size=4, align=4, name="f"} : ptr loc("test/wp/interproc.c":10:10)
+  core.store %f, %v1 {waived="object known"} loc("test/wp/interproc.c":10:10)
+  core.check.uninit %v1 {w=4} loc("test/wp/interproc.c":10:41)
+  %l2 = core.load %v1 {waived="object known"} : i32 loc("test/wp/interproc.c":10:41)
+  %t3 = core.i2b %l2 : bool loc("test/wp/interproc.c":10:41)
+  core.cond_br %t3, ^then1, ^endif2 loc("test/wp/interproc.c":10:41)
+^then1:
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":10:51)
+  %l4 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":10:51)
+  %c5 = core.const 7 : i32 loc("test/wp/interproc.c":10:55)
+  %t6 = core.and %l4, %c5 : i32 loc("test/wp/interproc.c":10:55)
+  core.return %t6 loc("test/wp/interproc.c":10:55)
+^endif2:
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":10:65)
+  %l7 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":10:65)
+  core.return %l7 loc("test/wp/interproc.c":10:65)
+}
+core.func @ip_safe(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/interproc.c":12:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/interproc.c":12:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/interproc.c":12:38)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":12:64)
+  %l2 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":12:64)
+  %r3 = core.call @clamp3(%l2) : i32 loc("test/wp/interproc.c":12:64)
+  %t4 = core.zext %r3 : i64 loc("test/wp/interproc.c":12:64)
+  core.check.ptr_arith %v1, %t4 loc("test/wp/interproc.c":12:64)
+  %p5 = core.ptr_add %v1, %t4 : ptr loc("test/wp/interproc.c":12:64)
+  core.check.null %p5 loc("test/wp/interproc.c":12:64)
+  core.check.uaf %p5 loc("test/wp/interproc.c":12:64)
+  core.check.oob %p5 {w=1, access="r"} loc("test/wp/interproc.c":12:64)
+  core.check.uninit %p5 {w=1} loc("test/wp/interproc.c":12:64)
+  %l6 = core.load %p5 : i8 loc("test/wp/interproc.c":12:64)
+  core.return %l6 loc("test/wp/interproc.c":12:64)
+}
+core.func @ip_unbounded(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/interproc.c":13:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/interproc.c":13:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/interproc.c":13:38)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":13:63)
+  %l2 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":13:63)
+  %r3 = core.call @ident(%l2) : i32 loc("test/wp/interproc.c":13:63)
+  %t4 = core.zext %r3 : i64 loc("test/wp/interproc.c":13:63)
+  core.check.ptr_arith %v1, %t4 loc("test/wp/interproc.c":13:63)
+  %p5 = core.ptr_add %v1, %t4 : ptr loc("test/wp/interproc.c":13:63)
+  core.check.null %p5 loc("test/wp/interproc.c":13:63)
+  core.check.uaf %p5 loc("test/wp/interproc.c":13:63)
+  core.check.oob %p5 {w=1, access="r"} loc("test/wp/interproc.c":13:63)
+  core.check.uninit %p5 {w=1} loc("test/wp/interproc.c":13:63)
+  %l6 = core.load %p5 : i8 loc("test/wp/interproc.c":13:63)
+  core.return %l6 loc("test/wp/interproc.c":13:63)
+}
+core.func @ip_toobig(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/interproc.c":14:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/interproc.c":14:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/interproc.c":14:38)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":14:65)
+  %l2 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":14:65)
+  %r3 = core.call @clamp15(%l2) : i32 loc("test/wp/interproc.c":14:65)
+  %t4 = core.zext %r3 : i64 loc("test/wp/interproc.c":14:65)
+  core.check.ptr_arith %v1, %t4 loc("test/wp/interproc.c":14:65)
+  %p5 = core.ptr_add %v1, %t4 : ptr loc("test/wp/interproc.c":14:65)
+  core.check.null %p5 loc("test/wp/interproc.c":14:65)
+  core.check.uaf %p5 loc("test/wp/interproc.c":14:65)
+  core.check.oob %p5 {w=1, access="r"} loc("test/wp/interproc.c":14:65)
+  core.check.uninit %p5 {w=1} loc("test/wp/interproc.c":14:65)
+  %l6 = core.load %p5 : i8 loc("test/wp/interproc.c":14:65)
+  core.return %l6 loc("test/wp/interproc.c":14:65)
+}
+core.func @ip_mixed(i32, i32) -> i8 {
+^entry(%k: i32, %f: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/interproc.c":15:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/interproc.c":15:6)
+  %v1 = core.alloca {size=4, align=4, name="f"} : ptr loc("test/wp/interproc.c":15:6)
+  core.store %f, %v1 {waived="object known"} loc("test/wp/interproc.c":15:6)
+  %v2 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/interproc.c":15:41)
+  core.check.uninit %v0 {w=4} loc("test/wp/interproc.c":15:66)
+  %l3 = core.load %v0 {waived="object known"} : i32 loc("test/wp/interproc.c":15:66)
+  core.check.uninit %v1 {w=4} loc("test/wp/interproc.c":15:69)
+  %l4 = core.load %v1 {waived="object known"} : i32 loc("test/wp/interproc.c":15:69)
+  %r5 = core.call @maybe(%l3, %l4) : i32 loc("test/wp/interproc.c":15:69)
+  %t6 = core.zext %r5 : i64 loc("test/wp/interproc.c":15:69)
+  core.check.ptr_arith %v2, %t6 loc("test/wp/interproc.c":15:69)
+  %p7 = core.ptr_add %v2, %t6 : ptr loc("test/wp/interproc.c":15:69)
+  core.check.null %p7 loc("test/wp/interproc.c":15:69)
+  core.check.uaf %p7 loc("test/wp/interproc.c":15:69)
+  core.check.oob %p7 {w=1, access="r"} loc("test/wp/interproc.c":15:69)
+  core.check.uninit %p7 {w=1} loc("test/wp/interproc.c":15:69)
+  %l8 = core.load %p7 : i8 loc("test/wp/interproc.c":15:69)
+  core.return %l8 loc("test/wp/interproc.c":15:69)
+}

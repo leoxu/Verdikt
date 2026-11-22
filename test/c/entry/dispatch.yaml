@@ -1,0 +1,6 @@
+taint_entries:
+  - function: dispatch
+    label: network
+    params:
+      cmd: { taint: value, type: int }
+      arg: { taint: value, type: int }

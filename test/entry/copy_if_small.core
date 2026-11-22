@@ -1,0 +1,15 @@
+// The taint entry of DESIGN.md §21.8: copy_if_small(char *dst, const char *src, int len)
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.func @copy_if_small(ptr, ptr, i32) -> i32 {
+^entry(%dst: ptr, %src: ptr, %len: i32):
+  %max = core.const 256 : i32
+  %big = core.icmp sgt %len, %max : bool
+  core.cond_br %big, ^reject, ^go
+^reject:
+  %m2 = core.const -2 : i32
+  core.return %m2
+^go:
+  %n = core.sext %len : i64
+  %r = core.call @memcpy(%dst, %src, %n) : ptr
+  core.return %len
+}

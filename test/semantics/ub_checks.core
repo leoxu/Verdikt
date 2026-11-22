@@ -1,0 +1,50 @@
+// RUN: @sdiv(7, 2) => 3
+// RUN: @sdiv(-7, 2) => -3
+// RUN: @sdiv(7, 0) => ub:div_by_zero
+// RUN: @sdiv(-2147483648, -1) => ub:div_overflow
+// RUN: @udiv_unchecked(7, 0) => -1
+// RUN: @addo(2147483647, 1) => ub:signed_overflow
+// RUN: @addo(2147483647, 1) mode=wrap => -2147483648
+// RUN: @addo(2147483647, 1) mode=assume => infeasible
+// RUN: @addo(1, 2) => 3
+// RUN: @shl(1, 4) => 16
+// RUN: @shl(1, 32) => ub:shift_range
+// RUN: @shl(-1, 1) => ub:shift_negative
+// RUN: @shl(1073741824, 1) => ub:shift_overflow
+// RUN: @neg(-2147483648) => ub:signed_overflow
+// RUN: @ignored(2147483647, 1) => -2147483648
+core.func @sdiv(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  core.check.div %a, %b {signed, origin="hl.binop sdiv", ub=div_by_zero} loc("t.c":3:10)
+  %q = core.sdiv %a, %b : i32
+  core.return %q
+}
+core.func @udiv_unchecked(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  %q = core.udiv %a, %b : i32
+  core.return %q
+}
+core.func @addo(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  core.check.sadd_ovf %a, %b
+  %s = core.add %a, %b {sov} : i32
+  core.return %s
+}
+core.func @ignored(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  core.check.sadd_ovf %a, %b {mode=ignore}
+  %s = core.add %a, %b {sov} : i32
+  core.return %s
+}
+core.func @shl(i32, i32) -> i32 {
+^entry(%a: i32, %s: i32):
+  core.check.shift %a, %s {signed_left}
+  %r = core.shl %a, %s : i32
+  core.return %r
+}
+core.func @neg(i32) -> i32 {
+^entry(%a: i32):
+  core.check.sneg_ovf %a
+  %r = core.neg %a {sov} : i32
+  core.return %r
+}

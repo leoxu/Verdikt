@@ -1,0 +1,173 @@
+// QNX Neutrino resource-manager API models (hlir-scan --qnx). Like linux.core these run on every engine and carry
+// the UB checks the real routine would hit. They exist because the implementations live in libc/libio-util inside
+// the QNX SDP, not in the sources being scanned, so without them every call here is an opaque external whose
+// return value is unconstrained -- and for the two functions below that is not a neutral approximation, it is the
+// difference between "this handler validated its request" and "this handler did not".
+//
+// Companion file: models/interfaces/qnx_resmgr.yaml, which says what a resmgr handler is HANDED. This file says
+// what the library functions it calls DO. Keep the two apart: the yaml never claims a request was validated, and
+// this file never claims anything about the shape of the receive buffer.
+
+// int iofunc_devctl_default(resmgr_context_t *ctp, io_devctl_t *msg, iofunc_ocb_t *ocb)
+//
+// The library's handler for the devctl commands every resmgr shares (DCMD_ALL_GETFLAGS/SETFLAGS/GETMOUNTFLAGS...).
+// Every handler in this tree opens with the same three lines:
+//
+//     if ((status = iofunc_devctl_default(ctp, msg, ocb)) != _RESMGR_DEFAULT) return status;
+//
+// `_RESMGR_DEFAULT` ((~0U ^ (~0U >> 1U)) | 1U, i.e. 0x80000001 as a signed int) means "not mine, carry on". The
+// model always returns it. That is NOT a narrowing that hides anything: on the other outcome the library has
+// already serviced a standard command and the module's own switch never runs, so nothing in the code under
+// analysis is skipped. Returning it unconditionally simply stops the scan from spending half its budget on a path
+// that immediately returns.
+core.func @iofunc_devctl_default(ptr, ptr, ptr) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr):
+  %dflt = core.const -2147483647 : i32
+  core.return %dflt
+}
+
+// int devctl_verify_len(resmgr_context_t *ctp, io_devctl_t *msg, iofunc_ocb_t *ocb, unsigned checks)
+// int iofunc_devctl_verify(resmgr_context_t *ctp, io_devctl_t *msg, iofunc_ocb_t *ocb, unsigned checks)
+//
+// THE function that decides whether a devctl request is well-formed, and the single most load-bearing model in
+// this file. Called as
+//
+//     if (devctl_verify_len(ctp, msg, ocb,
+//             _IO_DEVCTL_VERIFY_MSG_LEN | _IO_DEVCTL_VERIFY_LEN) != 0) return EINVAL;
+//
+// What the two length flags mean (sys/iomsg.h):
+//   _IO_DEVCTL_VERIFY_LEN      the length encoded in `dcmd` matches `msg->i.nbytes`
+//   _IO_DEVCTL_VERIFY_MSG_LEN  the server really RECEIVED at least that many bytes
+//
+// and the encoded length is get_device_size(dcmd) == ((unsigned)dcmd & ~DEVDIR_TOFROM) >> 16 (devctl.h), i.e. the
+// `sizeof(data)` that __DIOF/__DIOT/__DIOTF packed into bits 16..29 of the command. So on the success path
+// `nbytes` is not "some attacker number" at all: it is a function of `dcmd`, which the attacker also chooses, but
+// a 14-bit field of it -- at most 16383, and equal to the sizeof() of whatever struct that command declares.
+//
+// The model therefore WRITES that value into `msg->i.nbytes` (offset 8) on the success path instead of merely
+// assuming a bound. Writing it keeps the dependency on `dcmd` intact, so a handler that trusts `nbytes` as a
+// length is still analysed against attacker-derived data, while a handler that correctly calls verify first no
+// longer sees an unbounded `nbytes` it has no way to have caused.
+//
+// Not modelled, deliberately: the ACCESS and PRIVILEGE checks (_IO_DEVCTL_VERIFY_PRIV, the _ACC_ family). They
+// decide WHO may issue the command, not what the data looks like, and the scan's threat model already starts from
+// "a client that legitimately opened the node". A module relying on _VERIFY_PRIV for authorisation is an
+// access-control question to read by hand, not something this model should silently assert.
+//
+// Also not modelled: `checks`. The model gives the length guarantee regardless of which flags were passed, which
+// is WRONG for a caller that passes neither length flag -- such a caller gets a guarantee it did not ask for, and
+// a real missing-validation bug in it would be hidden. The flags are a compile-time constant at every call site
+// in this tree, so the right fix is to branch on them; until that is done, CHECK THE CALL SITE's flag argument
+// before trusting a "safe" verdict on a handler whose payload length matters.
+core.func @devctl_verify_len(ptr, ptr, ptr, i32) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr, %checks: i32):
+  %bad = core.nondet {name="devctl_verify_reject"} : bool
+  core.cond_br %bad, ^reject, ^accept
+^reject:
+  %einval = core.const 22 : i32
+  core.return %einval
+^accept:
+  %o4 = core.const 4 : i64
+  %pd = core.ptr_add %msg, %o4 : ptr
+  core.check.oob %pd {w=4, access="r", origin="devctl dcmd"}
+  %dcmd = core.load %pd {waived="checked above"} : i32
+  // ~DEVDIR_TOFROM == ~0xC0000000 == 0x3FFFFFFF
+  %mask = core.const 1073741823 : i32
+  %m = core.and %dcmd, %mask : i32
+  %sh = core.const 16 : i32
+  %sz = core.lshr %m, %sh : i32
+  %o8 = core.const 8 : i64
+  %pn = core.ptr_add %msg, %o8 : ptr
+  core.check.oob %pn {w=4, access="w", origin="devctl nbytes"}
+  core.store %sz, %pn {waived="checked above"}
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+core.func @iofunc_devctl_verify(ptr, ptr, ptr, i32) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr, %checks: i32):
+  %r = core.call @devctl_verify_len(%ctp, %msg, %ocb, %checks) : i32
+  core.return %r
+}
+
+// int iofunc_read_verify (resmgr_context_t *ctp, io_read_t  *msg, iofunc_ocb_t *ocb, int *nonblock)
+// int iofunc_write_verify(resmgr_context_t *ctp, io_write_t *msg, iofunc_ocb_t *ocb, int *nonblock)
+//
+// Reference: openqnx trunk/lib/c/iofunc/iofunc_{read,write}_verify.c. These are the read/write analogues of
+// iofunc_devctl_verify, but UNLIKE devctl_verify they do NOT bound msg->i.nbytes for a DEVICE. In the reference,
+// the only nbytes clamp is inside `if (IS32BIT(..) && S_ISREG(attr->mode) && nbytes != 0)` -- i.e. it applies to
+// regular FILES to stop a 64-bit offset+length overflowing LONG_MAX. A resource-manager device node is not
+// S_ISREG, so that branch is skipped and nbytes is returned untouched. What they DO is a permission gate:
+//   read  : (ocb->ioflag & _IO_FLAG_RD) == 0 -> EBADF
+//   write : (ocb->ioflag & _IO_FLAG_WR) == 0 -> EBADF ; read-only mount -> EROFS ; directory -> EISDIR
+// then EOK. So the handler gets NO length guarantee from these -- a device handler must bound nbytes itself
+// (<driver> does: main.c:1271 checks nbytes against ctp->size, main.c:1096 caps the frame count). The point of
+// modelling them rather than leaving them opaque is purely to remove the opacity: an opaque verify returns an
+// unconstrained value and (worse) fills_unknown over the caller's io_read_t/io_write_t, so the handler is then
+// analysed against a message the program never built. Modelled as the permission decision alone -- a nondet
+// reject (EBADF) vs accept (EOK) -- so both the handler's success path and its error path stay reachable, and
+// nothing is asserted about nbytes that the real function does not guarantee. The *nonblock out-param is left
+// unwritten: in the reference its store is empty, and <driver> reads its own timeout, not *nonblock.
+core.func @iofunc_read_verify(ptr, ptr, ptr, ptr) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr, %nonblock: ptr):
+  %bad = core.nondet {name="read_verify_reject"} : bool
+  core.cond_br %bad, ^reject, ^accept
+^reject:
+  %ebadf = core.const 9 : i32
+  core.return %ebadf
+^accept:
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+core.func @iofunc_write_verify(ptr, ptr, ptr, ptr) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr, %nonblock: ptr):
+  %bad = core.nondet {name="write_verify_reject"} : bool
+  core.cond_br %bad, ^reject, ^accept
+^reject:
+  %ebadf = core.const 9 : i32
+  core.return %ebadf
+^accept:
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// int iofunc_ocb_attach(resmgr_context_t *ctp, io_open_t *msg, iofunc_ocb_t *ocb, iofunc_attr_t *attr,
+//                       const resmgr_io_funcs_t *io_funcs)
+//
+// The one model in this API that CANNOT be declarative. Everything else the SDP writes into a caller's buffer is
+// content we have no way to name, and `fills_unknown` (models/qnx.yaml) says exactly that. This function's
+// load-bearing effect is not unknown at all -- it is an identity:
+//
+//     ocb->attr = attr;
+//
+// and getting it wrong is the difference between a handler reading the module's real attribute structure and a
+// handler reading a zeroed one. A measured failure, not a hypothetical: the OCB a resmgr handler is handed was
+// previously assumed to be a zeroed object, so `ocb->attr` was NULL and every `ocb->attr->...` in the tree either
+// produced a phantom null-deref or silently read zeros. `fills_unknown` would be WORSE here than nothing: an
+// unknown pointer at `ocb->attr` points at no object the analysis knows, so the dereference below it becomes
+// unresolvable instead of landing on the attribute structure the module actually built.
+//
+// `ioflag` is a different matter and is left to a nondet value: the library copies it out of the connect message,
+// so it is client-chosen, and pinning it to 0 would assert "opened neither for reading nor for writing", a state
+// no handler is ever called in. The remaining OCB fields (offset, sflag, flags) are the library's bookkeeping and
+// nothing in this tree reads them before writing them.
+//
+// Field offsets are from the QNX 8.0 SDP (aarch64le) record layout of struct _iofunc_ocb:
+//   0 attr (ptr)   8 ioflag (int32)   12 sflag (uint16)   14 flags (uint16)   16 offset (off_t)   [sizeof 32]
+core.func @iofunc_ocb_attach(ptr, ptr, ptr, ptr, ptr) -> i32 {
+^entry(%ctp: ptr, %msg: ptr, %ocb: ptr, %attr: ptr, %iof: ptr):
+  core.check.null %ocb
+  core.check.uaf %ocb
+  %z = core.const 0 : i64
+  %pa = core.ptr_add %ocb, %z : ptr
+  core.check.oob %pa {w=8, access="w", origin="iofunc_ocb_attach ocb->attr"}
+  core.store %attr, %pa {waived="checked above"}
+  %o8 = core.const 8 : i64
+  %pf = core.ptr_add %ocb, %o8 : ptr
+  core.check.oob %pf {w=4, access="w", origin="iofunc_ocb_attach ocb->ioflag"}
+  %fl = core.nondet {name="ocb_ioflag"} : i32
+  core.store %fl, %pf {waived="checked above"}
+  %r = core.nondet {name="ocb_attach_result"} : i32
+  core.return %r
+}

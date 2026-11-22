@@ -1,0 +1,3 @@
+models:
+  - function: ext_attr_init
+    fills_unknown: [ { ptr: arg0, size: 64 } ]

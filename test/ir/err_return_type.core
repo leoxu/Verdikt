@@ -1,0 +1,6 @@
+// ERROR: does not match function return type
+core.func @f() -> i32 {
+^entry:
+  %a = core.const 1 : i64
+  core.return %a
+}

@@ -1,0 +1,5 @@
+taint_entries:
+  - function: demo_su_sessiononly
+    label: su
+    params:
+      s: { taint: none, kind: buffer, size: { min: 8, max: 8 }, content: unknown }

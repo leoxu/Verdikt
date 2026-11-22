@@ -1,0 +1,5 @@
+taint_entries:
+  - function: parse_hdr
+    label: network
+    params:
+      h: { taint: pointee, kind: buffer, size: { min: 1, max: 1 } }

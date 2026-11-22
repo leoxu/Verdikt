@@ -1,0 +1,13 @@
+// FLAGS: coverage
+core.func @d(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  core.check.div %a, %b {signed}
+  %q = core.sdiv %a, %b : i32
+  core.check.shift %q, %b
+  %s = core.shl %q, %b : i32
+  core.check.sadd_ovf %s, %a
+  %t = core.add %s, %a {sov} : i32
+  core.check.sneg_ovf %t
+  %u = core.neg %t {sov} : i32
+  core.return %u
+}

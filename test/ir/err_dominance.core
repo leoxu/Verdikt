@@ -1,0 +1,10 @@
+// ERROR: does not dominate this use
+core.func @f(bool) -> i32 {
+^entry(%c: bool):
+  core.cond_br %c, ^a, ^b
+^a:
+  %x = core.const 1 : i32
+  core.return %x
+^b:
+  core.return %x
+}

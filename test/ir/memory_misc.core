@@ -1,0 +1,18 @@
+core.func @misc(ptr) -> i64 {
+^entry(%p: ptr):
+  %a = core.alloca {size=16, align=8} : ptr
+  %g = core.global_addr @table : ptr
+  %eq = core.ptr_cmp eq %a, %g : bool
+  %d = core.ptr_diff %a, %p : i64
+  %sz = core.obj_size %a : i64
+  %al = core.obj_alive %a : bool
+  %n = core.const 16 : i64
+  %b = core.const 0 : i8
+  core.memset %a, %b, %n
+  core.memcpy %a, %p, %n
+  core.memmove %a, %p, %n
+  %i = core.ptr_to_int %a : i64
+  %q = core.int_to_ptr %i : ptr
+  core.lifetime_end %a
+  core.return %d
+}

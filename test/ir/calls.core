@@ -1,0 +1,16 @@
+core.declare @puts(ptr) -> i32
+core.declare @abort() -> void
+core.func @callee(i32) -> i32 {
+^entry(%x: i32):
+  core.return %x
+}
+core.func @caller(ptr) -> i32 {
+^entry(%s: ptr):
+  %r = core.call @puts(%s) : i32
+  core.call @puts(%s)
+  %fp = core.func_addr @callee : ptr
+  %k = core.const 1 : i32
+  %r2 = core.call @callee(%k) : i32
+  core.call @abort()
+  core.unreachable
+}

@@ -1,0 +1,7 @@
+// ERROR: before its definition
+core.func @f(i32) -> i32 {
+^entry(%a: i32):
+  %r = core.add %a, %late : i32
+  %late = core.const 1 : i32
+  core.return %r
+}

@@ -1,0 +1,6 @@
+# The model under test: the returned handle's `data` field (offset 16) points at `size` (arg1) attacker bytes.
+models:
+  - function: get_block
+    returns: { alloc: { size: 24, zeroed: true, may_fail: true } }
+    points_to:
+      - { base: ret, offset: 16, size: arg1, source: disk }

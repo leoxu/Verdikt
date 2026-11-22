@@ -1,0 +1,10 @@
+taint_entries:
+  - function: consume
+    label: network
+    params:
+      counter:
+        taint: value
+        range: [2000000, 2000000]
+      trigger:
+        taint: value
+        range: [153, 153]

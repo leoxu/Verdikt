@@ -1,0 +1,56 @@
+core.declare @malloc(i64) -> ptr
+core.declare @free(ptr) -> void
+core.declare @calloc(i64, i64) -> ptr
+core.declare @memcpy(ptr, ptr, i64) -> ptr
+core.declare @memset(ptr, i32, i64) -> ptr
+
+// copies 8 bytes into a 4-byte buffer
+core.func @overflow(i32) -> i32 {
+^entry(%x: i32):
+  %four = core.const 4 : i64
+  %eight = core.const 8 : i64
+  %dst = core.call @malloc(%four) : ptr
+  %isn = core.is_null %dst : bool
+  core.cond_br %isn, ^ret, ^go
+^go:
+  %src = core.alloca {size=8} : ptr
+  %zero = core.const 0 : i32
+  %f = core.call @memset(%src, %zero, %eight) : ptr
+  %c = core.call @memcpy(%dst, %src, %eight) : ptr
+  core.call @free(%dst)
+  core.br ^ret
+^ret:
+  core.return %x
+}
+core.func @fine(i32) -> i32 {
+^entry(%x: i32):
+  %eight = core.const 8 : i64
+  %dst = core.call @malloc(%eight) : ptr
+  %isn = core.is_null %dst : bool
+  core.cond_br %isn, ^ret, ^go
+^go:
+  %src = core.alloca {size=8} : ptr
+  %zero = core.const 0 : i32
+  %f = core.call @memset(%src, %zero, %eight) : ptr
+  %c = core.call @memcpy(%dst, %src, %eight) : ptr
+  core.call @free(%dst)
+  core.br ^ret
+^ret:
+  core.return %x
+}
+core.func @free_twice(i32) -> i32 {
+^entry(%x: i32):
+  %eight = core.const 8 : i64
+  %p = core.call @malloc(%eight) : ptr
+  core.call @free(%p)
+  core.call @free(%p)
+  core.return %x
+}
+core.func @calloc_overflow(i64) -> i32 {
+^entry(%n: i64):
+  %big = core.const 0x4000000000000000 : i64
+  %p = core.call @calloc(%big, %n) : ptr
+  %isn = core.is_null %p : bool
+  %r = core.b2i %isn : i32
+  core.return %r
+}

@@ -1,0 +1,84 @@
+// Exploration structure: forks, switch, loops, calls, nondet, assume.
+core.func @classify(i32) -> i32 {
+^entry(%x: i32):
+  core.switch %x [1: ^one, 2: ^two, 3: ^three] default ^other
+^one:
+  %a = core.const 10 : i32
+  core.return %a
+^two:
+  %b = core.const 20 : i32
+  core.return %b
+^three:
+  %c = core.const 30 : i32
+  core.return %c
+^other:
+  %d = core.const 99 : i32
+  core.return %d
+}
+core.func @div_by_arg(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  core.check.div %a, %b {signed, origin="hl.binop sdiv"} loc("d.c":4:12)
+  %q = core.sdiv %a, %b : i32
+  core.return %q
+}
+core.func @guarded_div(i32, i32) -> i32 {
+^entry(%a: i32, %b: i32):
+  %z = core.const 0 : i32
+  %isz = core.icmp eq %b, %z : bool
+  core.cond_br %isz, ^bad, ^ok
+^bad:
+  core.return %z
+^ok:
+  core.check.div %a, %b {signed} loc("g.c":9:3)
+  %q = core.sdiv %a, %b : i32
+  core.return %q
+}
+core.func @count_to(i32) -> i32 {
+^entry(%n: i32):
+  %zero = core.const 0 : i32
+  core.br ^head(%zero)
+^head(%i: i32):
+  %c = core.icmp slt %i, %n : bool
+  core.cond_br %c, ^body, ^exit
+^body:
+  %one = core.const 1 : i32
+  %i2 = core.add %i, %one : i32
+  core.br ^head(%i2)
+^exit:
+  core.return %i
+}
+core.func @twice(i32) -> i32 {
+^entry(%x: i32):
+  %y = core.call @guarded_div(%x, %x) : i32
+  core.return %y
+}
+core.func @use_nondet(i32) -> i32 {
+^entry(%a: i32):
+  %k = core.nondet {name="k"} : i32
+  %lim = core.const 100 : i32
+  %in = core.icmp ult %k, %lim : bool
+  core.assume %in
+  core.check.div %a, %k {signed} loc("n.c":5:5)
+  %q = core.sdiv %a, %k : i32
+  core.return %q
+}
+core.func @assume_then_div(i32) -> i32 {
+^entry(%b: i32):
+  %z = core.const 0 : i32
+  %nz = core.icmp ne %b, %z : bool
+  core.assume %nz
+  %one = core.const 1 : i32
+  core.check.div %one, %b {signed}
+  %q = core.sdiv %one, %b : i32
+  core.return %q
+}
+core.func @unreachable_if_big(i32) -> i32 {
+^entry(%x: i32):
+  %c = core.const 1000 : i32
+  %big = core.icmp ugt %x, %c : bool
+  core.cond_br %big, ^dead, ^fine
+^dead:
+  core.unreachable
+^fine:
+  core.return %x
+}

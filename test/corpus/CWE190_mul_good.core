@@ -1,0 +1,15 @@
+// EXPECT: none
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %lim = core.const 1000 : i32
+  %small = core.icmp slt %x, %lim : bool
+  core.assume %small
+  %nlim = core.const -1000 : i32
+  %small2 = core.icmp sgt %x, %nlim : bool
+  core.assume %small2
+  %k = core.const 100000 : i32
+  core.check.smul_ovf %x, %k
+  %r = core.mul %x, %k {sov} : i32
+  core.return %r
+}

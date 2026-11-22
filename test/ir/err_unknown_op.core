@@ -1,0 +1,6 @@
+// ERROR: unknown op 'core.frobnicate'
+core.func @f() -> void {
+^entry:
+  core.frobnicate
+  core.return
+}

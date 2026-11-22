@@ -1,0 +1,9 @@
+// ERROR: redefinition of block ^a
+core.func @f() -> void {
+^entry:
+  core.br ^a
+^a:
+  core.br ^a
+^a:
+  core.return
+}

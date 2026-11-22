@@ -1,0 +1,2548 @@
+// C library models written in `core` (DESIGN.md §17.7 "model" calls). They run on every domain: the interpreter,
+// symbolic execution and (later) the taint-selective engine all see the same bodies, with the UB checks a real libc
+// would hit. Declare what you call in your own file (`core.declare @malloc(i64) -> ptr`); a model body completes it.
+
+// void *malloc(size_t n)  — may fail (nondet), returns NULL then.
+core.func @malloc(i64) -> ptr {
+^entry(%n: i64):
+  %p = core.heap_alloc %n {fail=nondet, name="malloc_fail"} : ptr
+  core.return %p
+}
+
+// void free(void *p) — free(NULL) is a no-op; anything but a live heap pointer to its start is UB.
+core.func @free(ptr) -> void {
+^entry(%p: ptr):
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^done, ^do
+^do:
+  core.check.free %p {expect=heap, origin="free"}
+  core.free %p
+  core.br ^done
+^done:
+  core.return
+}
+
+// void *calloc(size_t n, size_t sz) — NULL when n*sz overflows, memory is zeroed.
+core.func @calloc(i64, i64) -> ptr {
+^entry(%n: i64, %sz: i64):
+  %n128 = core.zext %n : i128
+  %s128 = core.zext %sz : i128
+  %w = core.mul %n128, %s128 : i128
+  %t = core.trunc %w : i64
+  %t128 = core.zext %t : i128
+  %ovf = core.icmp ne %w, %t128 : bool
+  core.cond_br %ovf, ^null, ^alloc
+^null:
+  %z = core.const 0 : i64
+  %np = core.int_to_ptr %z : ptr
+  core.return %np
+^alloc:
+  %p = core.heap_alloc %t {fail=nondet, name="calloc_fail"} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^out, ^fill
+^fill:
+  %zero = core.const 0 : i8
+  core.memset %p, %zero, %t
+  core.br ^out
+^out:
+  core.return %p
+}
+
+// void *memcpy(void *d, const void *s, size_t n) — both ranges must be in bounds (n == 0 is fine).
+core.func @memcpy(ptr, ptr, i64) -> ptr {
+^entry(%d: ptr, %s: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done, ^copy
+^copy:
+  core.check.null %d
+  core.check.uaf %d
+  core.check.null %s
+  core.check.uaf %s
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %dl = core.ptr_add %d, %last : ptr
+  %sl = core.ptr_add %s, %last : ptr
+  core.check.oob %d {w=1, access="w", origin="memcpy dst start"}
+  core.check.oob %dl {w=1, access="w", origin="memcpy dst end"}
+  core.check.oob %s {w=1, access="r", origin="memcpy src start"}
+  core.check.oob %sl {w=1, access="r", origin="memcpy src end"}
+  core.memcpy %d, %s, %n
+  core.br ^done
+^done:
+  core.return %d
+}
+
+// void *memmove(void *d, const void *s, size_t n) — like memcpy, the ranges may overlap.
+core.func @memmove(ptr, ptr, i64) -> ptr {
+^entry(%d: ptr, %s: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done, ^copy
+^copy:
+  core.check.null %d
+  core.check.uaf %d
+  core.check.null %s
+  core.check.uaf %s
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %dl = core.ptr_add %d, %last : ptr
+  %sl = core.ptr_add %s, %last : ptr
+  core.check.oob %d {w=1, access="w", origin="memmove dst start"}
+  core.check.oob %dl {w=1, access="w", origin="memmove dst end"}
+  core.check.oob %s {w=1, access="r", origin="memmove src start"}
+  core.check.oob %sl {w=1, access="r", origin="memmove src end"}
+  core.memmove %d, %s, %n
+  core.br ^done
+^done:
+  core.return %d
+}
+
+// void *memset(void *d, int c, size_t n)
+core.func @memset(ptr, i32, i64) -> ptr {
+^entry(%d: ptr, %c: i32, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done, ^fill
+^fill:
+  core.check.null %d
+  core.check.uaf %d
+  %one = core.const 1 : i64
+  %last = core.sub %n, %one : i64
+  %dl = core.ptr_add %d, %last : ptr
+  core.check.oob %d {w=1, access="w", origin="memset start"}
+  core.check.oob %dl {w=1, access="w", origin="memset end"}
+  %b = core.trunc %c : i8
+  core.memset %d, %b, %n
+  core.br ^done
+^done:
+  core.return %d
+}
+
+// ---- <ctype.h>: glibc's isdigit()/isalpha()/... are macros that index the table returned by __ctype_b_loc(). Without a
+// model the table is an unknown pointer (NULL or a zero object) and every use reports a bogus pointer-arithmetic error.
+// The table is built on first use for the C locale: entries for characters -128..255 (index c + 128); only ASCII has flags.
+// Flag bits as in glibc on little-endian: upper 0x100, lower 0x200, alpha 0x400, digit 0x800, xdigit 0x1000, space 0x2000,
+// print 0x4000, graph 0x8000, blank 0x1, cntrl 0x2, punct 0x4, alnum 0x8.
+core.func @__hlir_ctype_in(i64, i64, i64) -> i64 {
+^entry(%ch: i64, %lo: i64, %hi: i64):
+  %d = core.sub %ch, %lo : i64
+  %w0 = core.sub %hi, %lo : i64
+  %one = core.const 1 : i64
+  %w = core.add %w0, %one : i64
+  %in = core.icmp ult %d, %w : bool
+  %r = core.b2i %in : i64
+  core.return %r
+}
+core.func @__ctype_b_loc() -> ptr {
+^entry:
+  %flag = core.global_addr @__ctype_b_inited {size=1} : ptr
+  %tab = core.global_addr @__ctype_b_table {size=768} : ptr
+  %cell = core.global_addr @__ctype_b_cell {size=8} : ptr
+  %cur = core.load %flag {waived="object known"} : i8
+  %z8 = core.const 0 : i8
+  %fresh = core.icmp eq %cur, %z8 : bool
+  core.cond_br %fresh, ^init, ^done
+^init:
+  %one8 = core.const 1 : i8
+  core.store %one8, %flag {waived="object known"}
+  %zero = core.const 0 : i64
+  core.br ^loop(%zero)
+^loop(%i: i64):
+  %n = core.const 384 : i64
+  %go = core.icmp ult %i, %n : bool
+  core.cond_br %go, ^body, ^fin
+^body:
+  %c128 = core.const 128 : i64
+  %ch = core.sub %i, %c128 : i64
+  %c65 = core.const 65 : i64
+  %c90 = core.const 90 : i64
+  %c97 = core.const 97 : i64
+  %c122 = core.const 122 : i64
+  %c48 = core.const 48 : i64
+  %c57 = core.const 57 : i64
+  %c70 = core.const 70 : i64
+  %c102 = core.const 102 : i64
+  %c9 = core.const 9 : i64
+  %c13 = core.const 13 : i64
+  %c32 = core.const 32 : i64
+  %c126 = core.const 126 : i64
+  %c33 = core.const 33 : i64
+  %c0 = core.const 0 : i64
+  %c31 = core.const 31 : i64
+  %c127 = core.const 127 : i64
+  %upper = core.call @__hlir_ctype_in(%ch, %c65, %c90) : i64
+  %lower = core.call @__hlir_ctype_in(%ch, %c97, %c122) : i64
+  %digit = core.call @__hlir_ctype_in(%ch, %c48, %c57) : i64
+  %xu = core.call @__hlir_ctype_in(%ch, %c65, %c70) : i64
+  %xl = core.call @__hlir_ctype_in(%ch, %c97, %c102) : i64
+  %sp1 = core.call @__hlir_ctype_in(%ch, %c9, %c13) : i64
+  %is32i = core.icmp eq %ch, %c32 : bool
+  %is32 = core.b2i %is32i : i64
+  %is9i = core.icmp eq %ch, %c9 : bool
+  %is9 = core.b2i %is9i : i64
+  %ct1 = core.call @__hlir_ctype_in(%ch, %c0, %c31) : i64
+  %is127i = core.icmp eq %ch, %c127 : bool
+  %is127 = core.b2i %is127i : i64
+  %print = core.call @__hlir_ctype_in(%ch, %c32, %c126) : i64
+  %graph = core.call @__hlir_ctype_in(%ch, %c33, %c126) : i64
+  %alpha = core.or %upper, %lower : i64
+  %alnum = core.or %alpha, %digit : i64
+  %xd0 = core.or %digit, %xu : i64
+  %xd = core.or %xd0, %xl : i64
+  %space = core.or %sp1, %is32 : i64
+  %blank = core.or %is9, %is32 : i64
+  %cntrl = core.or %ct1, %is127 : i64
+  %notalnum = core.not %alnum : i64
+  %one = core.const 1 : i64
+  %na = core.and %notalnum, %one : i64
+  %punct = core.and %graph, %na : i64
+  %k100 = core.const 256 : i64
+  %k200 = core.const 512 : i64
+  %k400 = core.const 1024 : i64
+  %k800 = core.const 2048 : i64
+  %k1000 = core.const 4096 : i64
+  %k2000 = core.const 8192 : i64
+  %k4000 = core.const 16384 : i64
+  %k8000 = core.const 32768 : i64
+  %k2 = core.const 2 : i64
+  %k4 = core.const 4 : i64
+  %k8 = core.const 8 : i64
+  %f1 = core.mul %upper, %k100 : i64
+  %f2 = core.mul %lower, %k200 : i64
+  %f3 = core.mul %alpha, %k400 : i64
+  %f4 = core.mul %digit, %k800 : i64
+  %f5 = core.mul %xd, %k1000 : i64
+  %f6 = core.mul %space, %k2000 : i64
+  %f7 = core.mul %print, %k4000 : i64
+  %f8 = core.mul %graph, %k8000 : i64
+  %f9 = core.mul %cntrl, %k2 : i64
+  %f10 = core.mul %punct, %k4 : i64
+  %f11 = core.mul %alnum, %k8 : i64
+  %s1 = core.add %f1, %f2 : i64
+  %s2 = core.add %s1, %f3 : i64
+  %s3 = core.add %s2, %f4 : i64
+  %s4 = core.add %s3, %f5 : i64
+  %s5 = core.add %s4, %f6 : i64
+  %s6 = core.add %s5, %f7 : i64
+  %s7 = core.add %s6, %f8 : i64
+  %s8 = core.add %s7, %blank : i64
+  %s9 = core.add %s8, %f9 : i64
+  %s10 = core.add %s9, %f10 : i64
+  %flags = core.add %s10, %f11 : i64
+  %f16 = core.trunc %flags : i16
+  %two = core.const 2 : i64
+  %off = core.mul %i, %two : i64
+  %slot = core.ptr_add %tab, %off {waived="in-bounds by construction"} : ptr
+  core.store %f16, %slot {waived="in-bounds by construction"}
+  %inext = core.add %i, %one : i64
+  core.br ^loop(%inext)
+^fin:
+  %mid = core.const 256 : i64
+  %base = core.ptr_add %tab, %mid {waived="in-bounds by construction"} : ptr
+  core.store %base, %cell {waived="object known"}
+  core.br ^done
+^done:
+  core.return %cell
+}
+
+// ---- more libc: ffs, strlen helper, strdup, fgets, mmap/munmap.
+
+// int ffs(int x): 1-based index of the least significant set bit, 0 when x == 0 (so the result is in 0..32).
+core.func @ffs(i32) -> i32 {
+^entry(%x: i32):
+  %z = core.const 0 : i32
+  %zero = core.icmp eq %x, %z : bool
+  core.cond_br %zero, ^none, ^loop(%z)
+^loop(%i: i32):
+  %one = core.const 1 : i32
+  %sh = core.shl %x, %i {waived="constant in-range shift"} : i32
+  %lsb = core.lshr %x, %i {waived="constant in-range shift"} : i32
+  %b = core.and %lsb, %one : i32
+  %set = core.icmp ne %b, %z : bool
+  %n = core.add %i, %one : i32
+  core.cond_br %set, ^found(%n), ^loop(%n)
+^found(%r: i32):
+  core.return %r
+^none:
+  core.return %z
+}
+
+// size_t strlen helper: every byte read is bounds checked, so an unterminated string is an oob_read.
+// Bounded scan: the index of the first NUL, or `n` when there is none in the first `n` bytes -- WITHOUT reading
+// byte n. strncpy and strnlen may legally be handed a buffer that is not NUL-terminated, so a model built on
+// plain strlen() runs off the end of a perfectly valid object and reports an out-of-bounds read the real call
+// never performs (DESIGN.md §22.385).
+core.func @__hlir_strnlen(ptr, i64) -> i64 {
+^entry(%s: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %none = core.icmp eq %n, %z : bool
+  core.cond_br %none, ^done(%z), ^start
+^start:
+  core.check.null %s
+  core.check.uaf %s
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %hit = core.icmp uge %i, %n : bool
+  core.cond_br %hit, ^done(%n), ^look
+^look:
+  %q = core.ptr_add %s, %i : ptr
+  core.check.ptr_arith %s, %i
+  core.check.oob %q {w=1, access="r", origin="strnlen"}
+  %c = core.load %q {waived="checked above"} : i8
+  %z8 = core.const 0 : i8
+  %end = core.icmp eq %c, %z8 : bool
+  %one = core.const 1 : i64
+  %nx = core.add %i, %one : i64
+  core.cond_br %end, ^done(%i), ^loop(%nx)
+^done(%len: i64):
+  core.return %len
+}
+
+core.func @__hlir_strlen(ptr) -> i64 {
+^entry(%s: ptr):
+  core.check.null %s
+  core.check.uaf %s
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %q = core.ptr_add %s, %i : ptr
+  core.check.ptr_arith %s, %i
+  core.check.oob %q {w=1, access="r", origin="strlen"}
+  %c = core.load %q {waived="checked above"} : i8
+  %z8 = core.const 0 : i8
+  %end = core.icmp eq %c, %z8 : bool
+  %one = core.const 1 : i64
+  %n = core.add %i, %one : i64
+  core.cond_br %end, ^done(%i), ^loop(%n)
+^done(%len: i64):
+  core.return %len
+}
+
+// size_t strlen(const char *s): real source code calling strlen() directly (not through another hand-written
+// model that already uses __hlir_strlen internally, like strcat/strcmp/strdup above) used to get the declarative
+// YAML model instead (models/libc.yaml's `returns: { strlen: 0 }`), which the engine implements as an opaque,
+// concrete-bytes-only native primitive (`cstrlen()` in lib/semantics/Memory.h) -- not real branch-structured IR.
+// That has no cond_br for the concolic engine's branch-flipping exploration to discover "attacker-controlled
+// content with no NUL within N bytes" (the classic non-NUL-terminated-buffer-passed-to-strlen bug shape, e.g.
+// CVE-2021-3712/OpenSSL ASN1_STRING), and the symbolic engine can't evaluate it on genuinely symbolic bytes at
+// all ("string length needs concrete bytes" -- the exact incomplete: note this gap produces). A `core.func` body
+// here takes precedence over the YAML entry (see this file's header comment) and gives real source code calling
+// strlen() the same explorable, bounds-checked loop that strcat/strcmp/strdup already get internally.
+core.func @strlen(ptr) -> i64 {
+^entry(%s: ptr):
+  %r = core.call @__hlir_strlen(%s) : i64
+  core.return %r
+}
+
+// lldiv_t lldiv(long long num, long long den) -- and it returns a STRUCT, which is why it needed a model
+// rather than a whitelist entry. The frontend lowers a 16-byte struct return to an sret pointer:
+//     core.declare @lldiv(ptr, i64, i64) -> void
+// so an opaque @lldiv writes NEITHER field, and the caller then reads indeterminate memory. libarchive's
+// __archive_ntfs_to_unix does exactly that two lines later --
+//     tdiv = lldiv(value, NTFS_TICKS);
+//     if (tdiv.rem < 0) { ... }
+// -- which came back as a CONFIRMED uninit_read at archive_time.c:153 from BOTH the rar5 and the 7-Zip
+// entries. It was the model's fault, not libarchive's (DESIGN.md Sec.22.464).
+//
+// The lesson the whitelist entry would have missed: "this function sizes no buffer" is the wrong test
+// for whether it needs a model. What matters is whether it WRITES anything the caller reads back, and a
+// struct return is a write through a pointer the caller supplied.
+//
+// C says the quotient is truncated toward zero, which is core.sdiv/core.srem.
+core.func @lldiv(ptr, i64, i64) -> void {
+^entry(%out: ptr, %num: i64, %den: i64):
+  %q = core.sdiv %num, %den : i64
+  %r = core.srem %num, %den : i64
+  core.store %q, %out {waived="caller-supplied sret slot"}
+  %eight = core.const 8 : i64
+  %remp = core.ptr_add %out, %eight {waived="caller-supplied sret slot"} : ptr
+  core.store %r, %remp {waived="caller-supplied sret slot"}
+  core.return
+}
+
+// size_t strnlen(const char *s, size_t maxlen): the bounded form, and it had no public model at all --
+// @__hlir_strnlen existed only as a helper for other hand-written bodies, so real source code calling
+// strnlen() got an opaque external. That costs twice: an over-read inside the scan of s is invisible
+// (an opaque call reads nothing), and the returned length is unconstrained, so every bound computed
+// from it is free. libarchive's CAB reader calls it on attacker bytes and the entry failed its
+// opaque_calls gate on exactly this name (DESIGN.md Sec.22.463). Same one-line delegation as @strlen
+// above: the helper already walks the bytes with a per-iteration core.check.oob and stops at maxlen.
+core.func @strnlen(ptr, i64) -> i64 {
+^entry(%s: ptr, %n: i64):
+  %r = core.call @__hlir_strnlen(%s, %n) : i64
+  core.return %r
+}
+
+// char *strcpy(char *dst, const char *src): copies src including its terminating NUL to dst, which must have
+// room for strlen(src)+1 bytes -- the classic overflow footgun if dst was sized for a shorter string. Same real
+// core.func treatment as strcat/strncat/strdup below (and strlen above): the declarative YAML `copy:` size
+// mechanism (Machine.h's model::Size::Strlen -> Memory.h's cstrlen(), opaque/concrete-bytes-only) gives neither
+// the concolic engine a branch to flip nor the symbolic engine anything it can evaluate on genuinely symbolic
+// bytes ("string length needs concrete bytes"). src's own readability up to its NUL is already validated by
+// __hlir_strlen, so (matching strcat's pattern below) there's no separate check on the copy's source range.
+core.func @strcpy(ptr, ptr) -> ptr {
+^entry(%dst: ptr, %src: ptr):
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %one = core.const 1 : i64
+  %total = core.add %srclen, %one : i64
+  %lastoff = core.sub %total, %one : i64
+  %last = core.ptr_add %dst, %lastoff : ptr
+  core.check.ptr_arith %dst, %lastoff
+  core.check.null %dst
+  core.check.uaf %dst
+  core.check.oob %dst {w=1, access="w", origin="strcpy destination start"}
+  core.check.oob %last {w=1, access="w", origin="strcpy destination end"}
+  core.memcpy %dst, %src, %total
+  core.return %dst
+}
+
+// char *strcat(char *dst, const char *src): appends src (including its NUL) at dst+strlen(dst). The classic
+// overflow footgun this models: dst must have room for strlen(dst)+strlen(src)+1 bytes -- if dst was
+// synthesized/allocated only big enough for its initial content, appending a longer src overflows past the
+// object end. src's own readability up to its NUL is already validated by __hlir_strlen, so (matching strdup's
+// pattern above) there's no separate check on the copy's source range.
+core.func @strcat(ptr, ptr) -> ptr {
+^entry(%dst: ptr, %src: ptr):
+  %dstlen = core.call @__hlir_strlen(%dst) : i64
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %one = core.const 1 : i64
+  %total = core.add %srclen, %one : i64
+  %target = core.ptr_add %dst, %dstlen : ptr
+  core.check.ptr_arith %dst, %dstlen
+  %lastoff = core.sub %total, %one : i64
+  %last = core.ptr_add %target, %lastoff : ptr
+  core.check.ptr_arith %target, %lastoff
+  core.check.oob %target {w=1, access="w", origin="strcat destination start"}
+  core.check.oob %last {w=1, access="w", origin="strcat destination end"}
+  core.memcpy %target, %src, %total
+  core.return %dst
+}
+
+// char *strncat(char *dst, const char *src, size_t n): appends at most n bytes of src at dst+strlen(dst), then
+// always writes a NUL terminator after whatever was copied -- so up to n+1 bytes get written past dst's
+// original content, not n (a common off-by-one source if the caller sized dst's remaining room to exactly n).
+// ---- strncpy: NOT strcpy-with-a-cap. It writes exactly `n` bytes: at most strlen(src)+1 of them from src, and it
+// PADS THE REST WITH ZEROS. And when strlen(src) >= n it writes NO terminator at all -- the classic footgun, which
+// this model reproduces rather than papering over, so code that then reads the buffer as a C string is still caught.
+//
+// It had no model at all until now, which meant "assumed opaque: no effect on memory": the destination stayed
+// UNINITIALISED and every later read of it was reported as a uninit_read. Found as a false positive on the c-ares
+// fix tree (DESIGN.md §22.385 negative control): `strncpy(buf, src, sizeof buf)` then `if (*buf == \':\')` inside
+// ares_inet_pton6, a 51-byte stack buffer the program had just filled.
+core.func @strncpy(ptr, ptr, i64) -> ptr {
+^entry(%dst: ptr, %src: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %n, %z : bool
+  core.cond_br %empty, ^done, ^write
+^write:
+  core.check.null %dst
+  core.check.uaf %dst
+  %one = core.const 1 : i64
+  %lastoff = core.sub %n, %one : i64
+  %last = core.ptr_add %dst, %lastoff : ptr
+  core.check.ptr_arith %dst, %lastoff
+  core.check.oob %dst {w=1, access="w", origin="strncpy destination start"}
+  core.check.oob %last {w=1, access="w", origin="strncpy destination end"}
+  // how much really comes from src: min(strlen(src), n). The +1 terminator is part of the padding below, so a
+  // source at least as long as `n` contributes exactly `n` bytes and leaves the result unterminated.
+  // BOUNDED: strncpy reads at most `n` bytes of src, and a src with no terminator inside them is legal -- that is
+  // exactly the case where it leaves the destination unterminated. Scanning with plain strlen() here would read
+  // past a valid object and invent an out-of-bounds read.
+  %copylen = core.call @__hlir_strnlen(%src, %n) : i64
+  core.memcpy %dst, %src, %copylen
+  // pad [copylen, n) with zeros -- this is what makes the whole destination initialised, and it is the half a
+  // "strcpy with a limit" model would have got wrong.
+  %padlen = core.sub %n, %copylen : i64
+  %nopad = core.icmp eq %padlen, %z : bool
+  core.cond_br %nopad, ^done, ^pad
+^pad:
+  %tail = core.ptr_add %dst, %copylen : ptr
+  core.check.ptr_arith %dst, %copylen
+  %zb = core.const 0 : i8
+  core.memset %tail, %zb, %padlen
+  core.br ^done
+^done:
+  core.return %dst
+}
+
+core.func @strncat(ptr, ptr, i64) -> ptr {
+^entry(%dst: ptr, %src: ptr, %n: i64):
+  %dstlen = core.call @__hlir_strlen(%dst) : i64
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %lt = core.icmp ult %srclen, %n : bool
+  %copylen = core.select %lt, %srclen, %n : i64
+  %one = core.const 1 : i64
+  %total = core.add %copylen, %one : i64
+  %target = core.ptr_add %dst, %dstlen : ptr
+  core.check.ptr_arith %dst, %dstlen
+  %lastoff = core.sub %total, %one : i64
+  %last = core.ptr_add %target, %lastoff : ptr
+  core.check.ptr_arith %target, %lastoff
+  core.check.oob %target {w=1, access="w", origin="strncat destination start"}
+  core.check.oob %last {w=1, access="w", origin="strncat destination end"}
+  core.memcpy %target, %src, %copylen
+  %nul = core.const 0 : i8
+  core.store %nul, %last {waived="checked above"}
+  core.return %dst
+}
+
+// char *strdup(const char *s): malloc(strlen+1) and copy, NULL when the allocation fails.
+core.func @strdup(ptr) -> ptr {
+^entry(%s: ptr):
+  %len = core.call @__hlir_strlen(%s) : i64
+  %one = core.const 1 : i64
+  %n = core.add %len, %one : i64
+  %p = core.heap_alloc %n {fail=nondet, name="strdup_fail"} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^out, ^copy
+^copy:
+  core.memcpy %p, %s, %n
+  core.br ^out
+^out:
+  core.return %p
+}
+
+// char *strndup(const char *s, size_t n): strdup bounded by n -- copies at most n bytes and ALWAYS NUL-terminates,
+// so the allocation is strnlen(s, n) + 1 and never n + 1 when the string is shorter. Left opaque it returns an
+// unconstrained pointer, which cuts the taint at every place a parser keeps a copy of a field it just read:
+// libssh calls it on strings taken straight off the wire (src/misc.c, src/options.c).
+core.func @strndup(ptr, i64) -> ptr {
+^entry(%s: ptr, %n: i64):
+  %len = core.call @__hlir_strnlen(%s, %n) : i64
+  %one = core.const 1 : i64
+  %sz = core.add %len, %one : i64
+  %p = core.heap_alloc %sz {fail=nondet, name="strndup_fail"} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^out, ^copy
+^copy:
+  core.memcpy %p, %s, %len
+  %last = core.ptr_add %p, %len : ptr
+  %nul = core.const 0 : i8
+  core.store %nul, %last {waived="allocated len + 1 bytes above"}
+  core.br ^out
+^out:
+  core.return %p
+}
+
+// char *fgets(char *buf, int n, FILE *fp): reads at most n-1 attacker-controlled (file) bytes, then NUL-terminates. n <= 0,
+// end of file / error: NULL. The bytes come from __hlir_fill_file (a ModelDB `source`, see libc.yaml), so they are tainted.
+core.declare @__hlir_fill_file(ptr, i64) -> void
+core.func @fgets(ptr, i32, ptr) -> ptr {
+^entry(%buf: ptr, %n: i32, %fp: ptr):
+  %z32 = core.const 0 : i32
+  %bad = core.icmp sle %n, %z32 : bool
+  core.cond_br %bad, ^null, ^try
+^try:
+  %eof = core.nondet {name="fgets_eof"} : bool
+  core.cond_br %eof, ^null, ^fill
+^fill:
+  %n64 = core.sext %n : i64
+  %one = core.const 1 : i64
+  %m = core.sub %n64, %one : i64
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="fgets buffer start"}
+  %last = core.ptr_add %buf, %m : ptr
+  core.check.ptr_arith %buf, %m
+  core.check.oob %last {w=1, access="w", origin="fgets terminator"}
+  core.call @__hlir_fill_file(%buf, %m)
+  %nul = core.const 0 : i8
+  core.store %nul, %last {waived="checked above"}
+  core.return %buf
+^null:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+// size_t fread(void *buf, size_t size, size_t nmemb, FILE *fp): writes up to size*nmemb attacker-controlled (file)
+// bytes into buf, returns nmemb (worst case: a full read -- real fread can short-read on EOF/error, but that only
+// ever writes FEWER bytes, so modelling the full read is the useful case for finding overflow bugs; a size*nmemb==0
+// call is a no-op per the real contract). The bytes come from __hlir_fill_file (same ModelDB `source` fgets uses,
+// see libc.yaml), so they are tainted with the "file" label -- this plus the `getc`/`fgetc` models in libc.yaml are
+// what make a zero-parameter, FILE*-driven entry (no caller-supplied buffer/length parameter at all, e.g. a CLI
+// tool's `getc()`-in-a-loop parser) explorable with `--include-noarg`: the taint now originates from the call
+// inside the function body, not from an entry parameter. See docs/DESIGN.md's CVE-2016-3186/gif2tiff ground-truth
+// write-up for the diagnosis this model fixes.
+core.func @fread(ptr, i64, i64, ptr) -> i64 {
+^entry(%buf: ptr, %size: i64, %nmemb: i64, %fp: ptr):
+  %total = core.mul %size, %nmemb : i64
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %total, %z : bool
+  core.cond_br %empty, ^done0, ^fill
+^fill:
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="fread buffer start"}
+  %one = core.const 1 : i64
+  %lastoff = core.sub %total, %one : i64
+  %last = core.ptr_add %buf, %lastoff : ptr
+  core.check.ptr_arith %buf, %lastoff
+  core.check.oob %last {w=1, access="w", origin="fread buffer end"}
+  core.call @__hlir_fill_file(%buf, %total)
+  core.return %nmemb
+^done0:
+  core.return %z
+}
+
+// ssize_t getline(char **lineptr, size_t *n, FILE *stream): (re)allocates *lineptr to hold a NUL-terminated line
+// of attacker-controlled (file) bytes, sets *n to the allocation size, returns the number of bytes read, or -1
+// on EOF/failure (leaving *lineptr/*n untouched on that path -- the common real-world case). Simplified like
+// fread above: always a fresh, fixed 4096-byte allocation and a full read (the worst case that matters for
+// finding overflow bugs in the caller), not a model of "grow an existing *lineptr via realloc" or a short read.
+core.func @getline(ptr, ptr, ptr) -> i64 {
+^entry(%lineptr: ptr, %nptr: ptr, %fp: ptr):
+  %eof = core.nondet {name="getline_eof"} : bool
+  core.cond_br %eof, ^fail, ^read
+^read:
+  %cap = core.const 4096 : i64
+  %p = core.heap_alloc %cap {fail=nondet, name="getline_alloc_fail"} : ptr
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^fail, ^fill
+^fill:
+  core.check.null %lineptr
+  core.check.uaf %lineptr
+  core.check.oob %lineptr {w=8, access="w", origin="getline *lineptr"}
+  core.store %p, %lineptr {waived="checked above"}
+  core.check.null %nptr
+  core.check.uaf %nptr
+  core.check.oob %nptr {w=8, access="w", origin="getline *n"}
+  core.store %cap, %nptr {waived="checked above"}
+  %one = core.const 1 : i64
+  %m = core.sub %cap, %one : i64
+  core.call @__hlir_fill_file(%p, %m)
+  %last = core.ptr_add %p, %m : ptr
+  %nul = core.const 0 : i8
+  core.store %nul, %last {waived="allocated exactly cap bytes above"}
+  core.return %m
+^fail:
+  %negone = core.const -1 : i64
+  core.return %negone
+}
+
+// void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off): MAP_FAILED ((void *)-1) or a zeroed object of
+// len bytes (an anonymous / file mapping whose contents we do not know). len == 0 fails (EINVAL).
+core.func @mmap(ptr, i64, i32, i32, i32, i64) -> ptr {
+^entry(%addr: ptr, %len: i64, %prot: i32, %flags: i32, %fd: i32, %off: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %len, %z : bool
+  %f = core.nondet {name="mmap_fail"} : bool
+  %fail = core.or %empty, %f : bool
+  core.cond_br %fail, ^failed, ^map
+^failed:
+  %m1 = core.const -1 : i64
+  %mf = core.int_to_ptr %m1 : ptr
+  core.return %mf
+^map:
+  %p = core.heap_alloc %len {fail=never, name="mmap"} : ptr
+  %zero = core.const 0 : i8
+  core.memset %p, %zero, %len
+  core.return %p
+}
+
+// int munmap(void *addr, size_t len): the mapping must be one returned by mmap (a live object), unmapped as a whole.
+core.func @munmap(ptr, i64) -> i32 {
+^entry(%p: ptr, %len: i64):
+  core.check.free %p {expect=heap, origin="munmap"}
+  core.free %p
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// ssize_t recvmsg(int fd, struct msghdr *msg, int flags): fills the buffers of msg->msg_iov[0..1] with attacker-controlled
+// network bytes (Linux x86-64 layout: msg_iov at +16, msg_iovlen at +24; iovec = { base, len }). Returns the bytes
+// received (the sum of the iovec lengths, or fewer is not modelled: the full amount) or -1. Ancillary data (file
+// descriptors) is not produced: msg_controllen is set to 0.
+core.declare @__hlir_fill_network(ptr, i64) -> void
+core.func @recvmsg(i32, ptr, i32) -> i64 {
+^entry(%fd: i32, %msg: ptr, %flags: i32):
+  %fail = core.nondet {name="recvmsg_fail"} : bool
+  core.cond_br %fail, ^err, ^go
+^err:
+  %m1 = core.const -1 : i64
+  core.return %m1
+^go:
+  core.check.null %msg
+  core.check.uaf %msg
+  core.check.oob %msg {w=1, access="r", origin="recvmsg msghdr start"}
+  %o16 = core.const 16 : i64
+  %p16 = core.ptr_add %msg, %o16 : ptr
+  core.check.oob %p16 {w=8, access="r", origin="recvmsg msg_iov"}
+  %iov = core.load %p16 {waived="checked above"} : ptr
+  %o24 = core.const 24 : i64
+  %p24 = core.ptr_add %msg, %o24 : ptr
+  core.check.oob %p24 {w=8, access="r", origin="recvmsg msg_iovlen"}
+  %n = core.load %p24 {waived="checked above"} : i64
+  %z = core.const 0 : i64
+  %o40 = core.const 40 : i64
+  %p40 = core.ptr_add %msg, %o40 : ptr
+  core.check.oob %p40 {w=8, access="w", origin="recvmsg msg_controllen"}
+  core.store %z, %p40 {waived="checked above"}
+  %one = core.const 1 : i64
+  %two = core.const 2 : i64
+  %has0 = core.icmp ugt %n, %z : bool
+  core.cond_br %has0, ^v0, ^done(%z)
+^v0:
+  %b0 = core.load %iov {waived="checked by the caller: a valid iovec"} : ptr
+  %o8 = core.const 8 : i64
+  %l0p = core.ptr_add %iov, %o8 : ptr
+  %l0 = core.load %l0p {waived="checked by the caller: a valid iovec"} : i64
+  core.call @__hlir_fill_network(%b0, %l0)
+  %has1 = core.icmp ugt %n, %one : bool
+  core.cond_br %has1, ^v1, ^done(%l0)
+^v1:
+  %o16b = core.const 16 : i64
+  %iov1 = core.ptr_add %iov, %o16b : ptr
+  %b1 = core.load %iov1 {waived="checked by the caller: a valid iovec"} : ptr
+  %o8b = core.const 8 : i64
+  %l1p = core.ptr_add %iov1, %o8b : ptr
+  %l1 = core.load %l1p {waived="checked by the caller: a valid iovec"} : i64
+  core.call @__hlir_fill_network(%b1, %l1)
+  %tot = core.add %l0, %l1 : i64
+  core.br ^done(%tot)
+^done(%r: i64):
+  core.return %r
+}
+
+// int getsockopt(int fd, int level, int opt, void *val, socklen_t *len): writes *len bytes of option value (zeros: nothing
+// attacker-controlled is assumed about socket options) or fails.
+core.func @getsockopt(i32, i32, i32, ptr, ptr) -> i32 {
+^entry(%fd: i32, %lvl: i32, %opt: i32, %val: ptr, %lenp: ptr):
+  %fail = core.nondet {name="getsockopt_fail"} : bool
+  core.cond_br %fail, ^err, ^go
+^err:
+  %m1 = core.const -1 : i32
+  core.return %m1
+^go:
+  core.check.null %lenp
+  core.check.uaf %lenp
+  core.check.oob %lenp {w=4, access="r", origin="getsockopt len"}
+  %len32 = core.load %lenp {waived="checked above"} : i32
+  %len = core.zext %len32 : i64
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %len, %z : bool
+  core.cond_br %empty, ^ok, ^fill
+^fill:
+  core.check.null %val
+  core.check.uaf %val
+  %one = core.const 1 : i64
+  %last = core.sub %len, %one : i64
+  %vl = core.ptr_add %val, %last : ptr
+  core.check.oob %val {w=1, access="w", origin="getsockopt value start"}
+  core.check.oob %vl {w=1, access="w", origin="getsockopt value end"}
+  %zero = core.const 0 : i8
+  core.memset %val, %zero, %len
+  core.br ^ok
+^ok:
+  %r = core.const 0 : i32
+  core.return %r
+}
+
+// int *__errno_location(void): errno (one global int, zero until something sets it)
+core.func @__errno_location() -> ptr {
+^entry:
+  %e = core.global_addr @__hlir_errno {size=4} : ptr
+  core.return %e
+}
+
+// ---- strtoull / strtoul / strtoll / strtol: the real parsing (whitespace, sign, 0x/0 prefixes, digits < base, overflow ->
+// ERANGE and the saturated value), so values derived from the string stay symbolic. Every byte read is bounds checked.
+core.func @__hlir_cbyte(ptr, i64) -> i64 {
+^entry(%s: ptr, %i: i64):
+  %q = core.ptr_add %s, %i : ptr
+  core.check.ptr_arith %s, %i
+  core.check.oob %q {w=1, access="r", origin="strtol: reading the string"}
+  %c = core.load %q {waived="checked above"} : i8
+  %r = core.zext %c : i64
+  core.return %r
+}
+
+// digit value of an ASCII character, 99 for "not a digit"
+core.func @__hlir_digit(i64) -> i64 {
+^entry(%c: i64):
+  %c48 = core.const 48 : i64
+  %c58 = core.const 58 : i64
+  %ge0 = core.icmp uge %c, %c48 : bool
+  %lt9 = core.icmp ult %c, %c58 : bool
+  %isd = core.and %ge0, %lt9 : bool
+  core.cond_br %isd, ^dig, ^notd
+^dig:
+  %dv = core.sub %c, %c48 : i64
+  core.return %dv
+^notd:
+  %c97 = core.const 97 : i64
+  %c123 = core.const 123 : i64
+  %gel = core.icmp uge %c, %c97 : bool
+  %ltz = core.icmp ult %c, %c123 : bool
+  %isl = core.and %gel, %ltz : bool
+  core.cond_br %isl, ^low, ^notl
+^low:
+  %k87 = core.const 87 : i64
+  %lv = core.sub %c, %k87 : i64
+  core.return %lv
+^notl:
+  %c65 = core.const 65 : i64
+  %c91 = core.const 91 : i64
+  %geu = core.icmp uge %c, %c65 : bool
+  %ltu = core.icmp ult %c, %c91 : bool
+  %isu = core.and %geu, %ltu : bool
+  core.cond_br %isu, ^up, ^none
+^up:
+  %k55 = core.const 55 : i64
+  %uv = core.sub %c, %k55 : i64
+  core.return %uv
+^none:
+  %n99 = core.const 99 : i64
+  core.return %n99
+}
+
+// shared body: issigned = 0 -> strtoull, 1 -> strtoll
+core.func @__hlir_strtox(ptr, ptr, i32, i32) -> i64 {
+^entry(%nptr: ptr, %endp: ptr, %base32: i32, %sg: i32):
+  core.check.null %nptr
+  core.check.uaf %nptr
+  %z = core.const 0 : i64
+  core.br ^ws(%z)
+^ws(%i: i64):
+  %c = core.call @__hlir_cbyte(%nptr, %i) : i64
+  %k32 = core.const 32 : i64
+  %k9 = core.const 9 : i64
+  %k14 = core.const 14 : i64
+  %isb = core.icmp eq %c, %k32 : bool
+  %ge9 = core.icmp uge %c, %k9 : bool
+  %lt14 = core.icmp ult %c, %k14 : bool
+  %isr = core.and %ge9, %lt14 : bool
+  %issp = core.or %isb, %isr : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %issp, ^ws(%in), ^sign
+^sign:
+  %k45 = core.const 45 : i64
+  %k43 = core.const 43 : i64
+  %c2 = core.call @__hlir_cbyte(%nptr, %i) : i64
+  %isneg = core.icmp eq %c2, %k45 : bool
+  %isplus = core.icmp eq %c2, %k43 : bool
+  %hass = core.or %isneg, %isplus : bool
+  %o1 = core.const 1 : i64
+  %is1 = core.add %i, %o1 : i64
+  %start = core.select %hass, %is1, %i : i64
+  %base = core.sext %base32 : i64
+  %zb = core.icmp eq %base, %z : bool
+  %c0 = core.call @__hlir_cbyte(%nptr, %start) : i64
+  %k48 = core.const 48 : i64
+  %lead0 = core.icmp eq %c0, %k48 : bool
+  core.cond_br %zb, ^autob, ^pre16(%base, %start)
+^autob:
+  // real strtol looks at p[1] only after it has seen p[0] == '0'. Probing it unconditionally reads one byte past
+  // the object whenever the number starts at the terminator -- e.g. an all-whitespace string that ends exactly at
+  // the object boundary -- and that is a FALSE POSITIVE in every program that calls strtol (DESIGN.md §22.416).
+  // Re-reading [start] when the lead byte is not '0' is in bounds and cannot change the result: %hex is
+  // `lead0 && isx`, so it is false either way.
+  %s1raw = core.add %start, %o1 : i64
+  %s1 = core.select %lead0, %s1raw, %start : i64
+  %cx = core.call @__hlir_cbyte(%nptr, %s1) : i64
+  %k120 = core.const 120 : i64
+  %k88 = core.const 88 : i64
+  %isx1 = core.icmp eq %cx, %k120 : bool
+  %isx2 = core.icmp eq %cx, %k88 : bool
+  %isx = core.or %isx1, %isx2 : bool
+  %b16 = core.const 16 : i64
+  %b8 = core.const 8 : i64
+  %b10 = core.const 10 : i64
+  %hex = core.and %lead0, %isx : bool
+  %b8o10 = core.select %lead0, %b8, %b10 : i64
+  %ab = core.select %hex, %b16, %b8o10 : i64
+  core.br ^pre16(%ab, %start)
+^pre16(%bs: i64, %st: i64):
+  %k16 = core.const 16 : i64
+  %is16 = core.icmp eq %bs, %k16 : bool
+  // same one-past-the-end probe as ^autob, and the same guard: read [st] FIRST, and only move to [st+1] when the
+  // prefix is still possible. %pfx is `is16 && hxx && l0`, so pinning the index to [st] otherwise cannot change it.
+  %c0b = core.call @__hlir_cbyte(%nptr, %st) : i64
+  %l0 = core.icmp eq %c0b, %k48 : bool
+  %need16 = core.and %is16, %l0 : bool
+  %s1braw = core.add %st, %o1 : i64
+  %s1b = core.select %need16, %s1braw, %st : i64
+  %cxb = core.call @__hlir_cbyte(%nptr, %s1b) : i64
+  %kx = core.const 120 : i64
+  %kX = core.const 88 : i64
+  %hx1 = core.icmp eq %cxb, %kx : bool
+  %hx2 = core.icmp eq %cxb, %kX : bool
+  %hxx = core.or %hx1, %hx2 : bool
+  %p1 = core.and %is16, %hxx : bool
+  %pfx = core.and %p1, %l0 : bool
+  %two = core.const 2 : i64
+  %st2 = core.add %st, %two : i64
+  %dstart = core.select %pfx, %st2, %st : i64
+  core.br ^dig(%dstart, %z, %z)
+^dig(%j: i64, %acc: i64, %ovf: i64):
+  %cj = core.call @__hlir_cbyte(%nptr, %j) : i64
+  %dv = core.call @__hlir_digit(%cj) : i64
+  %okd = core.icmp ult %dv, %bs : bool
+  core.cond_br %okd, ^acc, ^done(%j, %acc, %ovf)
+^acc:
+  %mx = core.const -1 : i64
+  %room = core.sub %mx, %dv : i64
+  %lim = core.udiv %room, %bs : i64
+  %big = core.icmp ugt %acc, %lim : bool
+  %bigi = core.b2i %big : i64
+  %mul = core.mul %acc, %bs : i64
+  %nacc = core.add %mul, %dv : i64
+  %jn = core.add %j, %o1 : i64
+  %ovn = core.or %ovf, %bigi : i64
+  core.br ^dig(%jn, %nacc, %ovn)
+^done(%e: i64, %a: i64, %of: i64):
+  %nodig = core.icmp eq %e, %dstart : bool
+  core.cond_br %nodig, ^nodigits, ^have
+^nodigits:
+  %isnull0 = core.is_null %endp : bool
+  core.cond_br %isnull0, ^ret0, ^setn
+^setn:
+  core.check.uaf %endp
+  core.check.oob %endp {w=8, access="w", origin="strtol endptr"}
+  core.store %nptr, %endp {waived="checked above"}
+  core.br ^ret0
+^ret0:
+  core.return %z
+^have:
+  %isnull = core.is_null %endp : bool
+  core.cond_br %isnull, ^value, ^sete
+^sete:
+  core.check.uaf %endp
+  core.check.oob %endp {w=8, access="w", origin="strtol endptr"}
+  %endq = core.ptr_add %nptr, %e : ptr
+  core.store %endq, %endp {waived="checked above"}
+  core.br ^value
+^value:
+  %neg = core.b2i %isneg : i64
+  %issg = core.sext %sg : i64
+  %sgz = core.icmp ne %issg, %z : bool
+  core.cond_br %sgz, ^sgn, ^uns
+^uns:
+  %negacc = core.sub %z, %a : i64
+  %ur = core.select %isneg, %negacc, %a : i64
+  %ovfz = core.icmp ne %of, %z : bool
+  %mx2 = core.const -1 : i64
+  core.cond_br %ovfz, ^erange(%mx2), ^plain(%ur)
+^sgn:
+  %lim63 = core.const 9223372036854775808 : i64
+  %m63 = core.const 9223372036854775807 : i64
+  %sat_hi = core.icmp ugt %a, %m63 : bool
+  %sat_lo = core.icmp ugt %a, %lim63 : bool
+  %ovz = core.icmp ne %of, %z : bool
+  %nega = core.sub %z, %a : i64
+  %smin = core.const -9223372036854775808 : i64
+  %bad_neg = core.or %ovz, %sat_lo : bool
+  %bad_pos = core.or %ovz, %sat_hi : bool
+  %bad = core.select %isneg, %bad_neg, %bad_pos : bool
+  %satv = core.select %isneg, %smin, %m63 : i64
+  %sv = core.select %isneg, %nega, %a : i64
+  core.cond_br %bad, ^erange(%satv), ^plain(%sv)
+^erange(%rv: i64):
+  %errp = core.call @__errno_location() : ptr
+  %e34 = core.const 34 : i32
+  core.store %e34, %errp {waived="errno location"}
+  core.return %rv
+^plain(%pv: i64):
+  core.return %pv
+}
+
+core.func @strtoull(ptr, ptr, i32) -> i64 {
+^entry(%a: ptr, %b: ptr, %c: i32):
+  %s = core.const 0 : i32
+  %r = core.call @__hlir_strtox(%a, %b, %c, %s) : i64
+  core.return %r
+}
+core.func @strtoul(ptr, ptr, i32) -> i64 {
+^entry(%a: ptr, %b: ptr, %c: i32):
+  %s = core.const 0 : i32
+  %r = core.call @__hlir_strtox(%a, %b, %c, %s) : i64
+  core.return %r
+}
+core.func @strtoll(ptr, ptr, i32) -> i64 {
+^entry(%a: ptr, %b: ptr, %c: i32):
+  %s = core.const 1 : i32
+  %r = core.call @__hlir_strtox(%a, %b, %c, %s) : i64
+  core.return %r
+}
+core.func @strtol(ptr, ptr, i32) -> i64 {
+^entry(%a: ptr, %b: ptr, %c: i32):
+  %s = core.const 1 : i32
+  %r = core.call @__hlir_strtox(%a, %b, %c, %s) : i64
+  core.return %r
+}
+
+// double strtod(const char *nptr, char **endptr): unlike strtol/strtoul above, there was no model for this at all, so it fell
+// back to the generic opaque-external default — whose `endptr` output is an independent/arbitrary pointer, not one guaranteed
+// to point back into `nptr`'s object. Real strtod's contract (like strtol's, already modelled) guarantees endptr points into
+// the very same string passed in (unchanged, at nptr, when nothing was consumed), so `endptr - nptr` is always a same-object
+// pointer difference — a very common idiom (cJSON's parse_number does exactly this) that the opaque default broke, reporting a
+// spurious ptr_cmp_diff_obj. The float value itself isn't modelled exactly (`core` has no float type; floating point is
+// IEEE-bit-pattern-only and unconstrained for non-constant operands, see core.fop) — only the pointer semantics need to be
+// right here, so this scans the same superset of characters (digits, '.', 'e'/'E', '+'/'-') cJSON's own pre-filter accepts
+// before calling strtod, which is a safe over-approximation of real strtod's grammar for bounds/pointer purposes.
+core.func @strtod(ptr, ptr) -> i64 {
+^entry(%nptr: ptr, %endp: ptr):
+  core.check.null %nptr
+  core.check.uaf %nptr
+  %z = core.const 0 : i64
+  core.br ^ws(%z)
+^ws(%i: i64):
+  %c = core.call @__hlir_cbyte(%nptr, %i) : i64
+  %k32 = core.const 32 : i64
+  %k9 = core.const 9 : i64
+  %k14 = core.const 14 : i64
+  %isb = core.icmp eq %c, %k32 : bool
+  %ge9 = core.icmp uge %c, %k9 : bool
+  %lt14 = core.icmp ult %c, %k14 : bool
+  %isr = core.and %ge9, %lt14 : bool
+  %issp = core.or %isb, %isr : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %issp, ^ws(%in), ^sign(%i)
+^sign(%s0: i64):
+  %c2 = core.call @__hlir_cbyte(%nptr, %s0) : i64
+  %k45 = core.const 45 : i64
+  %k43 = core.const 43 : i64
+  %isneg = core.icmp eq %c2, %k45 : bool
+  %isplus = core.icmp eq %c2, %k43 : bool
+  %hass = core.or %isneg, %isplus : bool
+  %o1 = core.const 1 : i64
+  %s1 = core.add %s0, %o1 : i64
+  %start = core.select %hass, %s1, %s0 : i64
+  core.br ^scan(%start)
+^scan(%j: i64):
+  %cj = core.call @__hlir_cbyte(%nptr, %j) : i64
+  %d0 = core.const 48 : i64
+  %d10 = core.const 58 : i64
+  %isdig1 = core.icmp uge %cj, %d0 : bool
+  %isdig2 = core.icmp ult %cj, %d10 : bool
+  %isdigit = core.and %isdig1, %isdig2 : bool
+  %dot = core.const 46 : i64
+  %isdot = core.icmp eq %cj, %dot : bool
+  %eC = core.const 101 : i64
+  %isE1 = core.icmp eq %cj, %eC : bool
+  %EC = core.const 69 : i64
+  %isE2 = core.icmp eq %cj, %EC : bool
+  %ise = core.or %isE1, %isE2 : bool
+  %plus = core.const 43 : i64
+  %isplus2 = core.icmp eq %cj, %plus : bool
+  %minus = core.const 45 : i64
+  %isminus2 = core.icmp eq %cj, %minus : bool
+  %ispm = core.or %isplus2, %isminus2 : bool
+  %a1 = core.or %isdigit, %isdot : bool
+  %a2 = core.or %a1, %ise : bool
+  %isnum = core.or %a2, %ispm : bool
+  %jn = core.add %j, %one : i64
+  core.cond_br %isnum, ^scan(%jn), ^done(%j)
+^done(%e: i64):
+  %isnull = core.is_null %endp : bool
+  core.cond_br %isnull, ^value, ^setend
+^setend:
+  core.check.uaf %endp
+  core.check.oob %endp {w=8, access="w", origin="strtod endptr"}
+  %nodig = core.icmp eq %e, %start : bool
+  %endpos = core.select %nodig, %z, %e : i64
+  %endq = core.ptr_add %nptr, %endpos : ptr
+  core.store %endq, %endp {waived="checked above"}
+  core.br ^value
+^value:
+  %r = core.nondet {name="strtod_value"} : i64
+  core.return %r
+}
+
+// void *realloc(void *p, size_t n): NULL p is malloc(n); n == 0 frees (glibc: returns NULL); otherwise a new block with the old
+// contents (values and taint) up to min(old, n); the old block is freed only on success. p must be a live heap pointer to its start.
+core.func @realloc(ptr, i64) -> ptr {
+^entry(%p: ptr, %n: i64):
+  %isn = core.is_null %p : bool
+  core.cond_br %isn, ^fresh, ^have
+^fresh:
+  %q0 = core.heap_alloc %n {fail=nondet, name="realloc_fail"} : ptr
+  core.return %q0
+^have:
+  %z = core.const 0 : i64
+  %zero = core.icmp eq %n, %z : bool
+  core.cond_br %zero, ^release, ^grow
+^release:
+  core.check.free %p {expect=heap, origin="realloc"}
+  core.free %p
+  %zi = core.const 0 : i64
+  %np = core.int_to_ptr %zi : ptr
+  core.return %np
+^grow:
+  core.check.free %p {expect=heap, origin="realloc"}
+  %old = core.obj_size %p : i64
+  %q = core.heap_alloc %n {fail=nondet, name="realloc_fail"} : ptr
+  %isf = core.is_null %q : bool
+  core.cond_br %isf, ^fail, ^copy
+^fail:
+  core.return %q
+^copy:
+  %lt = core.icmp ult %old, %n : bool
+  %m = core.select %lt, %old, %n : i64
+  core.memcpy %q, %p, %m
+  core.free %p
+  core.return %q
+}
+
+// size_t malloc_usable_size(void *p) / je_malloc_usable_size / malloc_size (macOS):
+// the usable size of a heap block. glibc and jemalloc may return MORE than was requested; this model
+// returns EXACTLY the allocated size, which is the conservative direction -- a larger answer would
+// hand the caller slack the object may not have, and slack is where an overflow hides.
+//
+// Left opaque it returns an arbitrary untainted value, and an allocator that accounts with it breaks:
+// Redis's sds asks for the usable size right after every allocation and asserts on it, so sdsempty()
+// failed in the engine and a whole RESP scan executed ONE run with checks_queried == 0 (DESIGN.md
+// Sec.22.451). NULL is defined to return 0, as in glibc.
+core.func @malloc_usable_size(ptr) -> i64 {
+^entry(%p: ptr):
+  %n = core.is_null %p : bool
+  core.cond_br %n, ^nullp, ^have
+^nullp:
+  %z = core.const 0 : i64
+  core.return %z
+^have:
+  %sz = core.obj_size %p : i64
+  core.return %sz
+}
+
+core.func @je_malloc_usable_size(ptr) -> i64 {
+^entry(%p: ptr):
+  %r = core.call @malloc_usable_size(%p) : i64
+  core.return %r
+}
+
+core.func @malloc_size(ptr) -> i64 {
+^entry(%p: ptr):
+  %r = core.call @malloc_usable_size(%p) : i64
+  core.return %r
+}
+
+// void abort(void) / exit(int) / _exit(int): the program ends, the path goes no further (an infeasible path, not a finding).
+core.func @abort() -> void {
+^entry:
+  %z = core.const 0 : i32
+  %o = core.const 1 : i32
+  %f = core.icmp eq %z, %o : bool
+  core.assume %f {name="abort"}
+  core.return
+}
+core.func @exit(i32) -> void {
+^entry(%c: i32):
+  %z = core.const 0 : i32
+  %o = core.const 1 : i32
+  %f = core.icmp eq %z, %o : bool
+  core.assume %f {name="exit"}
+  core.return
+}
+core.func @_exit(i32) -> void {
+^entry(%c: i32):
+  %z = core.const 0 : i32
+  %o = core.const 1 : i32
+  %f = core.icmp eq %z, %o : bool
+  core.assume %f {name="_exit"}
+  core.return
+}
+
+// ---- <ctype.h> as functions (not the table-based macros): exact for the C locale, ASCII only.
+core.func @isspace(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 32 : i32
+  %t2 = core.icmp eq %c, %t1 : bool
+  %t3 = core.const 9 : i32
+  %t4 = core.icmp sge %c, %t3 : bool
+  %t5 = core.const 13 : i32
+  %t6 = core.icmp sle %c, %t5 : bool
+  %t7 = core.and %t4, %t6 : bool
+  %t8 = core.or %t2, %t7 : bool
+  %r = core.b2i %t8 : i32
+  core.return %r
+}
+core.func @isdigit(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 48 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 57 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @isupper(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 65 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 90 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @islower(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 97 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 122 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @isalpha(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 65 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 90 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %t6 = core.const 97 : i32
+  %t7 = core.icmp sge %c, %t6 : bool
+  %t8 = core.const 122 : i32
+  %t9 = core.icmp sle %c, %t8 : bool
+  %t10 = core.and %t7, %t9 : bool
+  %t11 = core.or %t5, %t10 : bool
+  %r = core.b2i %t11 : i32
+  core.return %r
+}
+core.func @isalnum(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 65 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 90 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %t6 = core.const 97 : i32
+  %t7 = core.icmp sge %c, %t6 : bool
+  %t8 = core.const 122 : i32
+  %t9 = core.icmp sle %c, %t8 : bool
+  %t10 = core.and %t7, %t9 : bool
+  %t11 = core.or %t5, %t10 : bool
+  %t12 = core.const 48 : i32
+  %t13 = core.icmp sge %c, %t12 : bool
+  %t14 = core.const 57 : i32
+  %t15 = core.icmp sle %c, %t14 : bool
+  %t16 = core.and %t13, %t15 : bool
+  %t17 = core.or %t11, %t16 : bool
+  %r = core.b2i %t17 : i32
+  core.return %r
+}
+core.func @isxdigit(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 48 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 57 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %t6 = core.const 65 : i32
+  %t7 = core.icmp sge %c, %t6 : bool
+  %t8 = core.const 70 : i32
+  %t9 = core.icmp sle %c, %t8 : bool
+  %t10 = core.and %t7, %t9 : bool
+  %t11 = core.or %t5, %t10 : bool
+  %t12 = core.const 97 : i32
+  %t13 = core.icmp sge %c, %t12 : bool
+  %t14 = core.const 102 : i32
+  %t15 = core.icmp sle %c, %t14 : bool
+  %t16 = core.and %t13, %t15 : bool
+  %t17 = core.or %t11, %t16 : bool
+  %r = core.b2i %t17 : i32
+  core.return %r
+}
+core.func @isprint(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 32 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 126 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @isgraph(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 33 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 126 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @iscntrl(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 0 : i32
+  %t2 = core.icmp sge %c, %t1 : bool
+  %t3 = core.const 31 : i32
+  %t4 = core.icmp sle %c, %t3 : bool
+  %t5 = core.and %t2, %t4 : bool
+  %t6 = core.const 127 : i32
+  %t7 = core.icmp eq %c, %t6 : bool
+  %t8 = core.or %t5, %t7 : bool
+  %r = core.b2i %t8 : i32
+  core.return %r
+}
+core.func @isblank(i32) -> i32 {
+^entry(%c: i32):
+  %t1 = core.const 32 : i32
+  %t2 = core.icmp eq %c, %t1 : bool
+  %t3 = core.const 9 : i32
+  %t4 = core.icmp eq %c, %t3 : bool
+  %t5 = core.or %t2, %t4 : bool
+  %r = core.b2i %t5 : i32
+  core.return %r
+}
+core.func @tolower(i32) -> i32 {
+^entry(%c: i32):
+  %k65 = core.const 65 : i32
+  %k90 = core.const 90 : i32
+  %k32 = core.const 32 : i32
+  %ge = core.icmp sge %c, %k65 : bool
+  %le = core.icmp sle %c, %k90 : bool
+  %up = core.and %ge, %le : bool
+  %l = core.add %c, %k32 : i32
+  %r = core.select %up, %l, %c : i32
+  core.return %r
+}
+core.func @toupper(i32) -> i32 {
+^entry(%c: i32):
+  %k97 = core.const 97 : i32
+  %k122 = core.const 122 : i32
+  %k32 = core.const 32 : i32
+  %ge = core.icmp sge %c, %k97 : bool
+  %le = core.icmp sle %c, %k122 : bool
+  %lo = core.and %ge, %le : bool
+  %u = core.sub %c, %k32 : i32
+  %r = core.select %lo, %u, %c : i32
+  core.return %r
+}
+
+// ---- formatted output: the formatted text itself is not modelled (the buffer just receives a NUL terminator when
+// there is room), but the return value IS modelled as a bounded, tainted nondet value -- not a hardcoded 0 -- because
+// real snprintf returns "the length that WOULD have been written", independent of `n` and uncapped by it (glibc:
+// truncation does not cap the return value). Code that chains `p += snprintf(p, remaining, ...)` to advance a write
+// pointer relies on exactly this property; with a hardcoded 0 that pattern's `p` never moves and the resulting
+// out-of-bounds-pointer bugs (e.g. CVE-2017-7376, docs/DESIGN.md Sec.22.205/22.298) are structurally unreachable. We
+// still don't model "how many bytes were actually written" -- we don't need to: once `p` has been driven past the
+// real buffer by accumulated over-large returns, the NEXT call's unconditional core.check.oob on %buf (below) is what
+// catches the resulting out-of-bounds write; this function doesn't need to understand `n` at all for that to work.
+// The nondet is clamped into [0, kSnprintfWouldWriteCap] (64KiB): large enough to blow past realistic small buffers
+// after a handful of accumulated calls, small enough to keep the symbolic range from being pathological for the
+// solver. Tainted with a dedicated "fmt" label (not "env"/a real source label) so findings reached through it are
+// honestly attributed to "format-length uncertainty", not literal attacker-controlled bytes.
+core.func @snprintf(ptr, i64, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %n: i64, %fmt: ptr, %va: ptr):
+  %z = core.const 0 : i64
+  %has = core.icmp ne %n, %z : bool
+  core.cond_br %has, ^put, ^out
+^put:
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="snprintf buffer"}
+  %nul = core.const 0 : i8
+  core.store %nul, %buf {waived="checked above"}
+  core.br ^out
+^out:
+  %rn = core.nondet {name="snprintf_wouldwrite", taint="fmt"} : i32
+  %rzero = core.const 0 : i32
+  %rcap = core.const 65536 : i32
+  %rneg = core.icmp slt %rn, %rzero : bool
+  %rnn = core.select %rneg, %rzero, %rn : i32
+  %rover = core.icmp sgt %rnn, %rcap : bool
+  %r = core.select %rover, %rcap, %rnn : i32
+  core.return %r
+}
+core.func @vsnprintf(ptr, i64, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %n: i64, %fmt: ptr, %ap: ptr):
+  %r = core.call @snprintf(%buf, %n, %fmt, %ap) : i32
+  core.return %r
+}
+core.func @sprintf(ptr, ptr, ptr) -> i32 {
+^entry(%buf: ptr, %fmt: ptr, %va: ptr):
+  core.check.null %buf
+  core.check.uaf %buf
+  core.check.oob %buf {w=1, access="w", origin="sprintf buffer"}
+  %nul = core.const 0 : i8
+  core.store %nul, %buf {waived="checked above"}
+  %r = core.const 0 : i32
+  core.return %r
+}
+
+// ---- string comparison and search: exact loops (every byte read is checked, an unterminated string is an oob_read). Opaque versions
+// would let `strncmp(p, "-->", 3) == 0` hold anywhere and parsers would walk off their buffers.
+// ASCII lowercase of one byte, for the case-insensitive comparisons below.
+core.func @__hlir_tolower(i64) -> i64 {
+^entry(%c: i64):
+  %a = core.const 65 : i64
+  %z = core.const 90 : i64
+  %ge = core.icmp uge %c, %a : bool
+  %le = core.icmp ule %c, %z : bool
+  %isup = core.and %ge, %le : bool
+  %d = core.const 32 : i64
+  %lo = core.add %c, %d : i64
+  %r = core.select %isup, %lo, %c : i64
+  core.return %r
+}
+
+// int strcasecmp(const char *, const char *) / strncasecmp: the case-insensitive comparisons every
+// configuration parser is built from. Unmodelled they return an unconstrained value, so each keyword
+// match is decided concretely and the branch behind it folds: measured on libssh's
+// ssh_config_parse_string, which reached 13% of the branches in the functions it entered while
+// `strcasecmp` was opaque (DESIGN.md Sec.22.491). They are written as @strcmp is, with both bytes
+// folded to lowercase first -- the comparison stays byte-by-byte and symbolic.
+core.func @strcasecmp(ptr, ptr) -> i32 {
+^entry(%a: ptr, %b: ptr):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %ra = core.call @__hlir_cbyte(%a, %i) : i64
+  %rb = core.call @__hlir_cbyte(%b, %i) : i64
+  %ca = core.call @__hlir_tolower(%ra) : i64
+  %cb = core.call @__hlir_tolower(%rb) : i64
+  %ne = core.icmp ne %ca, %cb : bool
+  core.cond_br %ne, ^diff, ^same
+^same:
+  %z2 = core.const 0 : i64
+  %end = core.icmp eq %ca, %z2 : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %end, ^eq, ^loop(%in)
+^eq:
+  %zero = core.const 0 : i32
+  core.return %zero
+^diff:
+  %d = core.sub %ca, %cb : i64
+  %r = core.trunc %d : i32
+  core.return %r
+}
+
+core.func @strncasecmp(ptr, ptr, i64) -> i32 {
+^entry(%a: ptr, %b: ptr, %n: i64):
+  %z = core.const 0 : i64
+  %none = core.icmp eq %n, %z : bool
+  core.cond_br %none, ^eq, ^loop(%z)
+^loop(%i: i64):
+  %done = core.icmp uge %i, %n : bool
+  core.cond_br %done, ^eq, ^step(%i)
+^step(%j: i64):
+  %ra = core.call @__hlir_cbyte(%a, %j) : i64
+  %rb = core.call @__hlir_cbyte(%b, %j) : i64
+  %ca = core.call @__hlir_tolower(%ra) : i64
+  %cb = core.call @__hlir_tolower(%rb) : i64
+  %ne = core.icmp ne %ca, %cb : bool
+  core.cond_br %ne, ^diff, ^same
+^same:
+  %z2 = core.const 0 : i64
+  %end = core.icmp eq %ca, %z2 : bool
+  %one = core.const 1 : i64
+  %jn = core.add %j, %one : i64
+  core.cond_br %end, ^eq, ^loop(%jn)
+^eq:
+  %zero = core.const 0 : i32
+  core.return %zero
+^diff:
+  %d = core.sub %ca, %cb : i64
+  %r = core.trunc %d : i32
+  core.return %r
+}
+
+// BSD/Windows spellings of the same two.
+core.func @stricmp(ptr, ptr) -> i32 {
+^entry(%a: ptr, %b: ptr):
+  %r = core.call @strcasecmp(%a, %b) : i32
+  core.return %r
+}
+core.func @strnicmp(ptr, ptr, i64) -> i32 {
+^entry(%a: ptr, %b: ptr, %n: i64):
+  %r = core.call @strncasecmp(%a, %b, %n) : i32
+  core.return %r
+}
+
+core.func @strcmp(ptr, ptr) -> i32 {
+^entry(%a: ptr, %b: ptr):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %ca = core.call @__hlir_cbyte(%a, %i) : i64
+  %cb = core.call @__hlir_cbyte(%b, %i) : i64
+  %ne = core.icmp ne %ca, %cb : bool
+  core.cond_br %ne, ^diff, ^same
+^same:
+  %z2 = core.const 0 : i64
+  %end = core.icmp eq %ca, %z2 : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %end, ^eq, ^loop(%in)
+^eq:
+  %zero = core.const 0 : i32
+  core.return %zero
+^diff:
+  %d = core.sub %ca, %cb : i64
+  %r = core.trunc %d : i32
+  core.return %r
+}
+
+core.func @strncmp(ptr, ptr, i64) -> i32 {
+^entry(%a: ptr, %b: ptr, %n: i64):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %done = core.icmp uge %i, %n : bool
+  core.cond_br %done, ^eq, ^body
+^body:
+  %ca = core.call @__hlir_cbyte(%a, %i) : i64
+  %cb = core.call @__hlir_cbyte(%b, %i) : i64
+  %ne = core.icmp ne %ca, %cb : bool
+  core.cond_br %ne, ^diff, ^same
+^same:
+  %z2 = core.const 0 : i64
+  %end = core.icmp eq %ca, %z2 : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %end, ^eq, ^loop(%in)
+^eq:
+  %zero = core.const 0 : i32
+  core.return %zero
+^diff:
+  %d = core.sub %ca, %cb : i64
+  %r = core.trunc %d : i32
+  core.return %r
+}
+
+core.func @strchr(ptr, i32) -> ptr {
+^entry(%s: ptr, %c: i32):
+  %cc = core.zext %c : i64
+  %m = core.const 255 : i64
+  %cm = core.and %cc, %m : i64
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %b = core.call @__hlir_cbyte(%s, %i) : i64
+  %hit = core.icmp eq %b, %cm : bool
+  core.cond_br %hit, ^found, ^next
+^found:
+  %p = core.ptr_add %s, %i {waived="the byte was just read"} : ptr
+  core.return %p
+^next:
+  %z2 = core.const 0 : i64
+  %end = core.icmp eq %b, %z2 : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %end, ^none, ^loop(%in)
+^none:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+// void *memchr(const void *s, int c, size_t n): the first byte in the first n bytes of s equal to (unsigned char)c, or NULL.
+core.func @memchr(ptr, i32, i64) -> ptr {
+^entry(%s: ptr, %c: i32, %n: i64):
+  %cc = core.zext %c : i64
+  %m = core.const 255 : i64
+  %cm = core.and %cc, %m : i64
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %done = core.icmp uge %i, %n : bool
+  core.cond_br %done, ^none, ^body
+^body:
+  %b = core.call @__hlir_cbyte(%s, %i) : i64
+  %hit = core.icmp eq %b, %cm : bool
+  core.cond_br %hit, ^found, ^next
+^found:
+  %p = core.ptr_add %s, %i {waived="the byte was just read"} : ptr
+  core.return %p
+^next:
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.br ^loop(%in)
+^none:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+// void *memmem(const void *h, size_t hl, const void *n, size_t nl): the first occurrence of the nl bytes of n inside
+// the first hl bytes of h -- a pointer into h, never another object -- or NULL; nl == 0 returns h (glibc). Without
+// this model the opaque-external default returned an unrelated object and every `p - h` after it was a spurious
+// ptr_cmp_diff_obj (c-ares ares_buf_consume_until_seq, DESIGN.md).
+core.func @memmem(ptr, i64, ptr, i64) -> ptr {
+^entry(%h: ptr, %hl: i64, %n: ptr, %nl: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %nl, %z : bool
+  core.cond_br %empty, ^whole, ^check
+^whole:
+  core.return %h
+^check:
+  %fits = core.icmp ule %nl, %hl : bool
+  core.cond_br %fits, ^outer(%z), ^none
+^outer(%i: i64):
+  %end = core.add %i, %nl : i64
+  %ok = core.icmp ule %end, %hl : bool
+  core.cond_br %ok, ^try(%i), ^none
+^try(%ti: i64):
+  // i + nl <= hl was just checked, so the nl bytes at h+i are inside the caller's own length bound.
+  %hp = core.ptr_add %h, %ti {waived="i+nl <= hl was just checked"} : ptr
+  %m = core.call @__hlir_memeq(%hp, %n, %nl) : i64
+  %one = core.const 1 : i64
+  %same = core.icmp eq %m, %one : bool
+  core.cond_br %same, ^found(%ti), ^next(%ti)
+^next(%ni: i64):
+  %one2 = core.const 1 : i64
+  %i1 = core.add %ni, %one2 : i64
+  core.br ^outer(%i1)
+^found(%fi: i64):
+  %p = core.ptr_add %h, %fi {waived="the nl bytes at fi were just read"} : ptr
+  core.return %p
+^none:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+core.func @memcmp(ptr, ptr, i64) -> i32 {
+^entry(%a: ptr, %b: ptr, %n: i64):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %done = core.icmp uge %i, %n : bool
+  core.cond_br %done, ^eq, ^body
+^body:
+  %ca = core.call @__hlir_cbyte(%a, %i) : i64
+  %cb = core.call @__hlir_cbyte(%b, %i) : i64
+  %ne = core.icmp ne %ca, %cb : bool
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.cond_br %ne, ^diff, ^loop(%in)
+^eq:
+  %zero = core.const 0 : i32
+  core.return %zero
+^diff:
+  %d = core.sub %ca, %cb : i64
+  %r = core.trunc %d : i32
+  core.return %r
+}
+
+// char *strstr(const char *h, const char *n): the first occurrence of n in h, or NULL.
+// int __hlir_memeq(const void *a, const void *b, size_t n): 1 iff the n bytes at a and b are equal, else 0.
+// The engine answers this branch-free when n is constant and all n bytes on both sides are provably readable
+// (Machine::memEqFast, DESIGN.md §22.393) -- one conjunction instead of n `core.cond_br`. This body is the
+// fallback, and it is deliberately LAZY: it stops at the first mismatch, so it never reads a byte the caller's
+// own loop would not have read, and the bounds check inside __hlir_cbyte stays exactly where it was.
+core.func @__hlir_memeq(ptr, ptr, i64) -> i64 {
+^entry(%a: ptr, %b: ptr, %n: i64):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%k: i64):
+  %done = core.icmp uge %k, %n : bool
+  core.cond_br %done, ^yes, ^cmp
+^cmp:
+  %x = core.call @__hlir_cbyte(%a, %k) : i64
+  %y = core.call @__hlir_cbyte(%b, %k) : i64
+  %same = core.icmp eq %x, %y : bool
+  %one = core.const 1 : i64
+  %k1 = core.add %k, %one : i64
+  core.cond_br %same, ^loop(%k1), ^no
+^yes:
+  %t = core.const 1 : i64
+  core.return %t
+^no:
+  core.return %z
+}
+
+core.func @strstr(ptr, ptr) -> ptr {
+^entry(%h: ptr, %n: ptr):
+  %nl = core.call @__hlir_strlen(%n) : i64
+  %z = core.const 0 : i64
+  core.br ^outer(%z)
+^outer(%i: i64):
+  %ch = core.call @__hlir_cbyte(%h, %i) : i64
+  %atend = core.icmp eq %ch, %z : bool
+  core.cond_br %atend, ^tail, ^try
+^tail:
+  %emptyn = core.icmp eq %nl, %z : bool
+  core.cond_br %emptyn, ^found, ^none
+^try:
+  // h+i is already validated: ^outer just read h[i] through __hlir_cbyte, which bounds-checked it.
+  %hp = core.ptr_add %h, %i {waived="the byte at i was just read"} : ptr
+  %m = core.call @__hlir_memeq(%hp, %n, %nl) : i64
+  %one = core.const 1 : i64
+  %eq = core.icmp eq %m, %one : bool
+  core.cond_br %eq, ^found2(%i), ^advance(%i)
+^advance(%bb: i64):
+  %one2 = core.const 1 : i64
+  %nx = core.add %bb, %one2 : i64
+  core.br ^outer(%nx)
+^found:
+  core.return %h
+^found2(%fb: i64):
+  %fp = core.ptr_add %h, %fb {waived="the bytes were just read"} : ptr
+  core.return %fp
+^none:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+// ---- wl_list (libwayland's intrusive doubly linked list, wayland-util.h: `struct wl_list { struct wl_list *prev,
+// *next; }`, prev at offset 0, next at offset 8): declared only -- the real bodies live in libwayland's own
+// wayland-util.c, which isn't part of the analysed module (only a prebuilt .so is linked). Without a model these fall
+// back to opaque (an unconstrained result each call, no effect on memory), and that breaks any loop that terminates
+// by testing the list's own linkage: a `while (!wl_list_empty(&head))` on a list the harness correctly built as
+// empty (self-referential: next == prev == &head) still "looks" non-empty to an opaque wl_list_empty() on every
+// call, since opaque ignores what's actually in memory -- the loop never terminates and only stops at the step limit
+// (DESIGN.md §22.26; the companion fix there for wl_resource_from_link/wl_resource_get_link covers the
+// `wl_resource_for_each` case, this one covers direct `wl_list_*` use). Modelled with the real field layout and the
+// real bodies (down to wl_list_remove leaving elm->prev/next NULL, matching wayland-util.c exactly), so the
+// self-referential-empty invariant and real insert/remove linkage are exact, not approximated.
+
+// int wl_list_empty(const struct wl_list *list) -- return list->next == list
+core.func @wl_list_empty(ptr) -> i32 {
+^entry(%list: ptr):
+  core.check.null %list
+  core.check.uaf %list
+  %o8 = core.const 8 : i64
+  %nextp = core.ptr_add %list, %o8 : ptr
+  core.check.oob %nextp {w=8, access="r", origin="wl_list_empty"}
+  %next = core.load %nextp {waived="checked above"} : ptr
+  %eq = core.ptr_cmp eq %next, %list : bool
+  %r = core.b2i %eq : i32
+  core.return %r
+}
+
+// void wl_list_init(struct wl_list *list) -- list->prev = list->next = list (the empty-list invariant)
+core.func @wl_list_init(ptr) -> void {
+^entry(%list: ptr):
+  core.check.null %list
+  core.check.uaf %list
+  core.check.oob %list {w=8, access="w", origin="wl_list_init prev"}
+  core.store %list, %list {waived="checked above"}
+  %o8 = core.const 8 : i64
+  %nextp = core.ptr_add %list, %o8 : ptr
+  core.check.oob %nextp {w=8, access="w", origin="wl_list_init next"}
+  core.store %list, %nextp {waived="checked above"}
+  core.return
+}
+
+// void wl_list_insert(struct wl_list *list, struct wl_list *elm) -- links elm right after list
+core.func @wl_list_insert(ptr, ptr) -> void {
+^entry(%list: ptr, %elm: ptr):
+  core.check.null %list
+  core.check.uaf %list
+  core.check.null %elm
+  core.check.uaf %elm
+  %o8 = core.const 8 : i64
+  %list_nextp = core.ptr_add %list, %o8 : ptr
+  core.check.oob %list_nextp {w=8, access="r", origin="wl_list_insert list->next"}
+  %list_next = core.load %list_nextp {waived="checked above"} : ptr
+  core.check.oob %elm {w=8, access="w", origin="wl_list_insert elm->prev"}
+  core.store %list, %elm {waived="checked above"}
+  %elm_nextp = core.ptr_add %elm, %o8 : ptr
+  core.check.oob %elm_nextp {w=8, access="w", origin="wl_list_insert elm->next"}
+  core.store %list_next, %elm_nextp {waived="checked above"}
+  core.store %elm, %list_nextp {waived="checked above"}
+  core.check.null %list_next
+  core.check.uaf %list_next
+  core.check.oob %list_next {w=8, access="w", origin="wl_list_insert list_next->prev"}
+  core.store %elm, %list_next {waived="checked above"}
+  core.return
+}
+
+// void wl_list_remove(struct wl_list *elm) -- unlinks elm; elm->prev/next become NULL (matching wayland-util.c)
+core.func @wl_list_remove(ptr) -> void {
+^entry(%elm: ptr):
+  core.check.null %elm
+  core.check.uaf %elm
+  core.check.oob %elm {w=8, access="r", origin="wl_list_remove elm->prev"}
+  %prev = core.load %elm {waived="checked above"} : ptr
+  %o8 = core.const 8 : i64
+  %elm_nextp = core.ptr_add %elm, %o8 : ptr
+  core.check.oob %elm_nextp {w=8, access="r", origin="wl_list_remove elm->next"}
+  %next = core.load %elm_nextp {waived="checked above"} : ptr
+  core.check.null %prev
+  core.check.uaf %prev
+  %prev_nextp = core.ptr_add %prev, %o8 : ptr
+  core.check.oob %prev_nextp {w=8, access="w", origin="wl_list_remove prev->next"}
+  core.store %next, %prev_nextp {waived="checked above"}
+  core.check.null %next
+  core.check.uaf %next
+  core.check.oob %next {w=8, access="w", origin="wl_list_remove next->prev"}
+  core.store %prev, %next {waived="checked above"}
+  %z = core.const 0 : i64
+  %np = core.int_to_ptr %z : ptr
+  core.store %np, %elm_nextp {waived="checked above"}
+  core.store %np, %elm {waived="checked above"}
+  core.return
+}
+
+// ---------------------------------------------------------------- option parsing and the file descriptor calls
+//
+// int getopt(int argc, char * const argv[], const char *optstring)
+//
+// The harness starts an initialiser with argc = 1 and argv = { "prog", NULL } (HarnessGen, DESIGN.md §22.368 §2):
+// a program invoked with no options. For THAT input `-1` ("no more options") is not an approximation, it is the
+// correct answer, and `optarg` staying NULL is correct too. Analysing a module as if it had been given options is
+// a different configuration and belongs in a per-configuration prologue (§22.368 §6), not in this model.
+//
+// Why it matters enough to model at all: a QNX resource manager's `main` is
+// `while ((c = getopt(argc, argv, "...")) != -1) switch (c) { ... }`. Left opaque, the return value is
+// unconstrained, so that loop condition is symbolic and the explorer forks on it every iteration while `optarg`
+// -- a GLOBAL the opaque call does not write -- stays at its static initialiser, which then reads as NULL. The
+// initialiser burns its budget in the option loop and never reaches the code that sets the module up.
+// (the real implementation is at the end of this file, DESIGN.md §22.380)
+
+// int getopt_long(int argc, char * const argv[], const char *optstring, const struct option *longopts, int *longindex)
+core.func @getopt_long(i32, ptr, ptr, ptr, ptr) -> i32 {
+^entry(%argc: i32, %argv: ptr, %optstring: ptr, %longopts: ptr, %longindex: ptr):
+  %r = core.call @getopt(%argc, %argv, %optstring) : i32
+  core.return %r
+}
+
+// ssize_t write(int fd, const void *buf, size_t count)
+//
+// Modelled for the CHECK, not for the return value: `write` reads `count` bytes out of `buf`, so a bad length is
+// an out-of-bounds READ of the caller's buffer and this is where it is detected. Left opaque the call has "no
+// effect on memory" and that defect is invisible. Mirrors the `_copy_from_user` model's shape (linux.core).
+core.func @write(i32, ptr, i64) -> i64 {
+^entry(%fd: i32, %buf: ptr, %count: i64):
+  %z = core.const 0 : i64
+  %empty = core.icmp eq %count, %z : bool
+  core.cond_br %empty, ^done, ^go
+^go:
+  core.check.null %buf
+  core.check.uaf %buf
+  %one = core.const 1 : i64
+  %last = core.sub %count, %one : i64
+  %end = core.ptr_add %buf, %last : ptr
+  core.check.ptr_arith %buf, %last
+  core.check.oob %buf {w=1, access="r", origin="write source start"}
+  core.check.oob %end {w=1, access="r", origin="write source end"}
+  core.br ^done
+^done:
+  // -1 (error) .. count: the caller must handle a short write, and a model that always succeeded would hide the
+  // bug in code that does not.
+  %r = core.nondet {name="write_result"} : i64
+  core.return %r
+}
+
+// int open(const char *path, int oflag, ...) / int close(int fd): no memory effect beyond reading the path, which
+// the caller owns; modelled only so the fd is a plain unconstrained int rather than an unmodelled-external stop
+// under --strict-externs.
+core.func @close(i32) -> i32 {
+^entry(%fd: i32):
+  %r = core.nondet {name="close_result"} : i32
+  core.return %r
+}
+
+// ---------------------------------------------------------------- a real getopt (DESIGN.md §22.380)
+//
+// Replaces the stub above, which returned -1 unconditionally. That stub was not an approximation of anything: it
+// asserted "this program was started with no options", and for a program whose options are MANDATORY the
+// assertion is simply false. Measured on <driver>: `main` returned at its first check -- `<driver>`
+// rejecting `ctrl_num == INVALID_CTRL_NUM` -- so the entire initialiser was skipped, every global stayed at its
+// static value, and all six handlers were vacuous safes. Nothing in the report named it.
+//
+// With `argv:` stated in the project's externs file the command line is CONCRETE, so this can be an ordinary
+// interpreter of it rather than anything symbolic: the initialiser runs once, with the arguments the program is
+// really launched with, and every branch it takes is the branch the real program takes.
+//
+// Scope, stated rather than implied:
+//   * short options only, with POSIX's `c` / `c:` optstring, and both `-c0` and `-c 0` spellings of an argument;
+//   * a leading `:` in optstring (silent-error mode) is accepted and ignored -- '?' is returned either way;
+//   * the FIRST non-option word ends the scan (POSIX behaviour, not glibc's permutation). Every resource manager
+//     in the tree passes its options first, so permuting would change nothing it does;
+//   * `--` ends the scan, consuming itself;
+//   * no long options -- `getopt_long` below still forwards here, so a module that really uses long options gets
+//     the short-option answer for them, which is '?' rather than the right letter. That is a gap, not a silence:
+//     it shows up as the module taking its "invalid usage" path, which is visible in coverage.
+//
+// `optind` and the within-word position are the real globals, so repeated calls advance exactly as the C library
+// does. glibc treats `optind == 0` as "reset"; here a zero also just means "nobody initialised it", and both want
+// the same thing -- start at argv[1].
+core.func @__hlir_getopt_scan(ptr, i8) -> i64 {
+^entry(%optstring: ptr, %c: i8):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %p = core.ptr_add %optstring, %i : ptr
+  core.check.oob %p {w=1, access="r", origin="getopt optstring"}
+  %ch = core.load %p {waived="checked above"} : i8
+  %nul = core.const 0 : i8
+  %end = core.icmp eq %ch, %nul : bool
+  core.cond_br %end, ^miss, ^test
+^test:
+  %hit = core.icmp eq %ch, %c : bool
+  core.cond_br %hit, ^found, ^next
+^next:
+  %one = core.const 1 : i64
+  %i2 = core.add %i, %one : i64
+  core.br ^loop(%i2)
+^found:
+  %one2 = core.const 1 : i64
+  %j = core.add %i, %one2 : i64
+  %q = core.ptr_add %optstring, %j : ptr
+  core.check.oob %q {w=1, access="r", origin="getopt optstring"}
+  %nx = core.load %q {waived="checked above"} : i8
+  %colon = core.const 58 : i8
+  %needs = core.icmp eq %nx, %colon : bool
+  core.cond_br %needs, ^witharg, ^noarg
+^witharg:
+  %two = core.const 2 : i64
+  core.return %two
+^noarg:
+  %one3 = core.const 1 : i64
+  core.return %one3
+^miss:
+  %zz = core.const 0 : i64
+  core.return %zz
+}
+
+core.func @getopt(i32, ptr, ptr) -> i32 {
+^entry(%argc: i32, %argv: ptr, %optstring: ptr):
+  %pind = core.global_addr @optind {size=4} : ptr
+  %ppos = core.global_addr @__hlir_optpos {size=4} : ptr
+  %parg = core.global_addr @optarg {size=8} : ptr
+  %popt = core.global_addr @optopt {size=4} : ptr
+  %i0 = core.load %pind {waived="object known"} : i32
+  %p0 = core.load %ppos {waived="object known"} : i32
+  %c0 = core.const 0 : i32
+  %c1 = core.const 1 : i32
+  %indz = core.icmp eq %i0, %c0 : bool
+  %ind = core.select %indz, %c1, %i0 : i32
+  %posz = core.icmp eq %p0, %c0 : bool
+  %pos = core.select %posz, %c1, %p0 : i32
+  core.br ^word(%ind, %pos)
+^word(%wi: i32, %wp: i32):
+  %done = core.icmp sge %wi, %argc : bool
+  core.cond_br %done, ^stop, ^have
+^have:
+  core.store %wi, %pind {waived="object known"}
+  %wi64 = core.sext %wi : i64
+  %eight = core.const 8 : i64
+  %voff = core.mul %wi64, %eight : i64
+  %vp = core.ptr_add %argv, %voff : ptr
+  core.check.oob %vp {w=8, access="r", origin="getopt argv[optind]"}
+  %w = core.load %vp {waived="checked above"} : ptr
+  %isnull = core.is_null %w : bool
+  core.cond_br %isnull, ^stop, ^notnull
+^notnull:
+  %zo = core.const 0 : i64
+  %w0p = core.ptr_add %w, %zo : ptr
+  core.check.oob %w0p {w=1, access="r", origin="getopt argv word"}
+  %w0 = core.load %w0p {waived="checked above"} : i8
+  %dash = core.const 45 : i8
+  %isdash = core.icmp eq %w0, %dash : bool
+  core.cond_br %isdash, ^dashed, ^stop
+^dashed:
+  %oneo = core.const 1 : i64
+  %w1p = core.ptr_add %w, %oneo : ptr
+  core.check.oob %w1p {w=1, access="r", origin="getopt argv word"}
+  %w1 = core.load %w1p {waived="checked above"} : i8
+  %nul0 = core.const 0 : i8
+  %bare = core.icmp eq %w1, %nul0 : bool
+  core.cond_br %bare, ^stop, ^notbare
+^notbare:
+  %isdash2 = core.icmp eq %w1, %dash : bool
+  core.cond_br %isdash2, ^maybeend, ^letter
+^maybeend:
+  %twoo = core.const 2 : i64
+  %w2p = core.ptr_add %w, %twoo : ptr
+  core.check.oob %w2p {w=1, access="r", origin="getopt argv word"}
+  %w2 = core.load %w2p {waived="checked above"} : i8
+  %isend = core.icmp eq %w2, %nul0 : bool
+  core.cond_br %isend, ^consume, ^letter
+^consume:
+  %wi1 = core.add %wi, %c1 : i32
+  core.store %wi1, %pind {waived="object known"}
+  core.store %c1, %ppos {waived="object known"}
+  %m1a = core.const -1 : i32
+  core.return %m1a
+^letter:
+  %wp64 = core.sext %wp : i64
+  %cp = core.ptr_add %w, %wp64 : ptr
+  core.check.oob %cp {w=1, access="r", origin="getopt option letter"}
+  %c = core.load %cp {waived="checked above"} : i8
+  %spent = core.icmp eq %c, %nul0 : bool
+  core.cond_br %spent, ^nextword, ^opt
+^nextword:
+  %wiN = core.add %wi, %c1 : i32
+  core.store %c1, %ppos {waived="object known"}
+  core.br ^word(%wiN, %c1)
+^opt:
+  %wpN = core.add %wp, %c1 : i32
+  core.store %wpN, %ppos {waived="object known"}
+  %kind = core.call @__hlir_getopt_scan(%optstring, %c) : i64
+  %ci = core.zext %c : i32
+  %zero64 = core.const 0 : i64
+  %unknown = core.icmp eq %kind, %zero64 : bool
+  core.cond_br %unknown, ^bad, ^known
+^bad:
+  core.store %ci, %popt {waived="object known"}
+  %qm = core.const 63 : i32
+  core.return %qm
+^known:
+  %two64 = core.const 2 : i64
+  %takes = core.icmp eq %kind, %two64 : bool
+  core.cond_br %takes, ^argneeded, ^plain
+^plain:
+  core.return %ci
+^argneeded:
+  %wpN64 = core.sext %wpN : i64
+  %restp = core.ptr_add %w, %wpN64 : ptr
+  core.check.oob %restp {w=1, access="r", origin="getopt attached argument"}
+  %rest = core.load %restp {waived="checked above"} : i8
+  %empty = core.icmp eq %rest, %nul0 : bool
+  core.cond_br %empty, ^separate, ^attached
+^attached:
+  core.store %restp, %parg {waived="object known"}
+  %wiA = core.add %wi, %c1 : i32
+  core.store %wiA, %pind {waived="object known"}
+  core.store %c1, %ppos {waived="object known"}
+  core.return %ci
+^separate:
+  %wiS = core.add %wi, %c1 : i32
+  %noarg = core.icmp sge %wiS, %argc : bool
+  core.cond_br %noarg, ^missing, ^takeit
+^missing:
+  core.store %wiS, %pind {waived="object known"}
+  core.store %c1, %ppos {waived="object known"}
+  core.store %ci, %popt {waived="object known"}
+  %qm2 = core.const 63 : i32
+  core.return %qm2
+^takeit:
+  %wiS64 = core.sext %wiS : i64
+  %eight2 = core.const 8 : i64
+  %aoff = core.mul %wiS64, %eight2 : i64
+  %ap = core.ptr_add %argv, %aoff : ptr
+  core.check.oob %ap {w=8, access="r", origin="getopt argv[optind]"}
+  %aw = core.load %ap {waived="checked above"} : ptr
+  core.store %aw, %parg {waived="object known"}
+  %wiT = core.add %wiS, %c1 : i32
+  core.store %wiT, %pind {waived="object known"}
+  core.store %c1, %ppos {waived="object known"}
+  core.return %ci
+^stop:
+  core.store %wi, %pind {waived="object known"}
+  core.store %c1, %ppos {waived="object known"}
+  %m1 = core.const -1 : i32
+  core.return %m1
+}
+
+// ---- byte order: ntohs/ntohl/htons/htonl (and the BSD/glibc bswap spellings).
+//
+// These are PURE byte permutations, but left unmodelled they are opaque externs returning an "arbitrary
+// untainted" value -- which cuts taint at every multi-byte field a network parser extracts. Measured on
+// tcpdump's VQP printer: ntohl opaque for 100 calls and ntohs for 25, after which the TLV length fields the
+// defect depends on carried no taint at all, the search bottomed out after 78 runs at 97/267 blocks, and the
+// scan reported `safe` (DESIGN.md §22.408). This is the §22.388 pathology in a different costume.
+//
+// Written for a LITTLE-ENDIAN host, which is what every target in this corpus is built for; on a big-endian
+// host these are the identity and the model would be wrong. That restriction is deliberate and stated rather
+// than hidden behind a configure-time guess.
+core.func @ntohs(i16) -> i16 {
+^entry(%x: i16):
+  %c8 = core.const 8 : i16
+  %hi = core.shl %x, %c8 : i16
+  %lo = core.lshr %x, %c8 : i16
+  %r = core.or %hi, %lo : i16
+  core.return %r
+}
+
+core.func @htons(i16) -> i16 {
+^entry(%x: i16):
+  %r = core.call @ntohs(%x) : i16
+  core.return %r
+}
+
+core.func @ntohl(i32) -> i32 {
+^entry(%x: i32):
+  %c8 = core.const 8 : i32
+  %c24 = core.const 24 : i32
+  %mff = core.const 255 : i32
+  %mff00 = core.const 65280 : i32
+  %b0 = core.and %x, %mff : i32
+  %r0 = core.shl %b0, %c24 : i32
+  %b1 = core.and %x, %mff00 : i32
+  %r1 = core.shl %b1, %c8 : i32
+  %s1 = core.lshr %x, %c8 : i32
+  %r2 = core.and %s1, %mff00 : i32
+  %s2 = core.lshr %x, %c24 : i32
+  %r3 = core.and %s2, %mff : i32
+  %o1 = core.or %r0, %r1 : i32
+  %o2 = core.or %r2, %r3 : i32
+  %r = core.or %o1, %o2 : i32
+  core.return %r
+}
+
+core.func @htonl(i32) -> i32 {
+^entry(%x: i32):
+  %r = core.call @ntohl(%x) : i32
+  core.return %r
+}
+
+// ---- strlcpy / strlcat (BSD, and widely vendored -- tcpdump uses them throughout util-print.c).
+//
+// Left unmodelled they are opaque externs: the destination is never written in the model, and the RETURN
+// value -- which is what every caller uses to detect truncation and which may legitimately EXCEED `size` --
+// comes back as an arbitrary untainted integer, cutting taint at exactly the length the caller then acts on.
+// Same shape as the ntohs/ntohl gap of DESIGN.md §22.408.
+//
+// size_t strlcpy(char *dst, const char *src, size_t size): copies min(strlen(src), size-1) bytes and always
+// terminates when size > 0; RETURNS strlen(src), i.e. the length it WANTED to write. Reading all of src is
+// faithful: the real one calls strlen on it, so an unterminated src is a genuine over-read.
+core.func @strlcpy(ptr, ptr, i64) -> i64 {
+^entry(%dst: ptr, %src: ptr, %size: i64):
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %z = core.const 0 : i64
+  %nospace = core.icmp eq %size, %z : bool
+  core.cond_br %nospace, ^done, ^copy
+^copy:
+  core.check.null %dst
+  core.check.uaf %dst
+  %one = core.const 1 : i64
+  %cap = core.sub %size, %one : i64
+  %fits = core.icmp ule %srclen, %cap : bool
+  core.cond_br %fits, ^whole, ^clipped
+^whole:
+  core.br ^write(%srclen)
+^clipped:
+  core.br ^write(%cap)
+^write(%n: i64):
+  core.check.ptr_arith %dst, %n
+  %end = core.ptr_add %dst, %n : ptr
+  core.check.oob %dst {w=1, access="w", origin="strlcpy destination start"}
+  core.check.oob %end {w=1, access="w", origin="strlcpy terminator"}
+  core.memcpy %dst, %src, %n
+  %zb = core.const 0 : i8
+  core.store %zb, %end {waived="checked above"}
+  core.br ^done
+^done:
+  core.return %srclen
+}
+
+// size_t strlcat(char *dst, const char *src, size_t size): appends at the first NUL within the first `size`
+// bytes of dst. RETURNS the length it wanted, which is dstlen + strlen(src) and may exceed `size`. When dst
+// holds no NUL in `size` bytes the BSD contract is to return size + strlen(src) and write nothing.
+core.func @strlcat(ptr, ptr, i64) -> i64 {
+^entry(%dst: ptr, %src: ptr, %size: i64):
+  %srclen = core.call @__hlir_strlen(%src) : i64
+  %dstlen = core.call @__hlir_strnlen(%dst, %size) : i64
+  %full = core.icmp uge %dstlen, %size : bool
+  core.cond_br %full, ^unterm, ^append
+^unterm:
+  %r0 = core.add %size, %srclen : i64
+  core.return %r0
+^append:
+  %one = core.const 1 : i64
+  %left0 = core.sub %size, %dstlen : i64
+  %left = core.sub %left0, %one : i64
+  %fits = core.icmp ule %srclen, %left : bool
+  core.cond_br %fits, ^whole, ^clipped
+^whole:
+  core.br ^write(%srclen)
+^clipped:
+  core.br ^write(%left)
+^write(%n: i64):
+  core.check.ptr_arith %dst, %dstlen
+  %tail = core.ptr_add %dst, %dstlen : ptr
+  core.check.ptr_arith %tail, %n
+  %end = core.ptr_add %tail, %n : ptr
+  core.check.oob %tail {w=1, access="w", origin="strlcat append point"}
+  core.check.oob %end {w=1, access="w", origin="strlcat terminator"}
+  core.memcpy %tail, %src, %n
+  %zb = core.const 0 : i8
+  core.store %zb, %end {waived="checked above"}
+  %r1 = core.add %dstlen, %srclen : i64
+  core.return %r1
+}
+
+// ---- strpbrk / strspn / strcspn: the character-class family (DESIGN.md §22.412).
+//
+// All three ask the same question once per input character -- "is this byte in that constant set?" -- which
+// is exactly what Machine::charClassFast answers in closed form for @strchr (§22.385). So they are written
+// to CALL @strchr on the set, and the fold comes for free: no second folding rule, no second oracle, and
+// when the set is not a program constant they fall back to @strchr's loop like everything else.
+//
+// The c == 0 case is handled BEFORE the call on purpose: strchr(set, 0) legitimately returns the set's
+// terminator, so asking it about the input's own terminator would report a match that is not one.
+
+// char *strpbrk(const char *s, const char *accept): first byte of s that appears in accept, else NULL.
+core.func @strpbrk(ptr, ptr) -> ptr {
+^entry(%s: ptr, %acc: ptr):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %b = core.call @__hlir_cbyte(%s, %i) : i64
+  %z64 = core.const 0 : i64
+  %end = core.icmp eq %b, %z64 : bool
+  core.cond_br %end, ^none, ^test
+^test:
+  %b32 = core.trunc %b : i32
+  %hit = core.call @strchr(%acc, %b32) : ptr
+  %isn = core.is_null %hit : bool
+  core.cond_br %isn, ^next, ^found
+^found:
+  %p = core.ptr_add %s, %i {waived="the byte was just read"} : ptr
+  core.return %p
+^next:
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.br ^loop(%in)
+^none:
+  %zero = core.const 0 : i64
+  %np = core.int_to_ptr %zero : ptr
+  core.return %np
+}
+
+// size_t strspn(const char *s, const char *accept): length of the initial run of s made only of accept bytes.
+core.func @strspn(ptr, ptr) -> i64 {
+^entry(%s: ptr, %acc: ptr):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %b = core.call @__hlir_cbyte(%s, %i) : i64
+  %z64 = core.const 0 : i64
+  %end = core.icmp eq %b, %z64 : bool
+  core.cond_br %end, ^done(%i), ^test
+^test:
+  %b32 = core.trunc %b : i32
+  %hit = core.call @strchr(%acc, %b32) : ptr
+  %isn = core.is_null %hit : bool
+  core.cond_br %isn, ^done(%i), ^next
+^next:
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.br ^loop(%in)
+^done(%n: i64):
+  core.return %n
+}
+
+// size_t strcspn(const char *s, const char *reject): length of the initial run of s free of reject bytes.
+core.func @strcspn(ptr, ptr) -> i64 {
+^entry(%s: ptr, %rej: ptr):
+  %z = core.const 0 : i64
+  core.br ^loop(%z)
+^loop(%i: i64):
+  %b = core.call @__hlir_cbyte(%s, %i) : i64
+  %z64 = core.const 0 : i64
+  %end = core.icmp eq %b, %z64 : bool
+  core.cond_br %end, ^done(%i), ^test
+^test:
+  %b32 = core.trunc %b : i32
+  %hit = core.call @strchr(%rej, %b32) : ptr
+  %isn = core.is_null %hit : bool
+  core.cond_br %isn, ^next, ^done(%i)
+^next:
+  %one = core.const 1 : i64
+  %in = core.add %i, %one : i64
+  core.br ^loop(%in)
+^done(%n: i64):
+  core.return %n
+}
+
+
+// void explicit_bzero(void *s, size_t n) / void bzero(void *, size_t): memset(s, 0, n) that the compiler may not
+// optimise away. The "may not be optimised away" part is a compiler contract, not a semantic one, so for the engine
+// these ARE memset -- and writing them as such matters because left opaque they write nothing, which keeps whatever
+// the buffer held before and hides a use-after-scrub. libssh calls explicit_bzero on every key buffer it drops.
+core.func @explicit_bzero(ptr, i64) -> void {
+^entry(%s: ptr, %n: i64):
+  %z = core.const 0 : i32
+  %r = core.call @memset(%s, %z, %n) : ptr
+  core.return
+}
+
+core.func @bzero(ptr, i64) -> void {
+^entry(%s: ptr, %n: i64):
+  %z = core.const 0 : i32
+  %r = core.call @memset(%s, %z, %n) : ptr
+  core.return
+}
+
+// char *strtok_r(char *s, const char *delim, char **save): the POSIX re-entrant tokeniser, written the way POSIX
+// specifies it -- skip a run of delimiters (@strspn), take the run that is free of them (@strcspn), WRITE a NUL over
+// the delimiter that ended the token, and leave the rest in *save. The write is the part a model must not skip: it
+// is a store into the caller's buffer, and callers that hand strtok_r a string literal or a const buffer are a real
+// defect class. It is bounds checked like any other store.
+//
+// Unmodelled it returns an unconstrained pointer and writes nothing, which cuts the taint: libssh's
+// ssh_known_hosts_parse_line tokenises the known_hosts line it is handed, and with @strtok_r opaque the whole parse
+// ran with checks_queried == 0 -- a vacuous scan that the acceptance gates caught (DESIGN.md Sec.22.488).
+//
+// @strtok (the non-reentrant one) is deliberately NOT here: its save slot is a hidden static, so modelling it means
+// inventing a global, and every caller of it in one scan would then share that global's state.
+core.func @strtok_r(ptr, ptr, ptr) -> ptr {
+^entry(%s: ptr, %delim: ptr, %save: ptr):
+  %isn = core.is_null %s : bool
+  core.cond_br %isn, ^fromsave, ^have(%s)
+^fromsave:
+  core.check.null %save
+  core.check.uaf %save
+  core.check.oob %save {w=8, access="r", origin="strtok_r saveptr"}
+  %sv = core.load %save {waived="checked above"} : ptr
+  core.br ^have(%sv)
+^have(%p: ptr):
+  %nsp = core.call @strspn(%p, %delim) : i64
+  core.check.ptr_arith %p, %nsp
+  %q = core.ptr_add %p, %nsp : ptr
+  %z = core.const 0 : i64
+  %b = core.call @__hlir_cbyte(%q, %z) : i64
+  %atend = core.icmp eq %b, %z : bool
+  core.cond_br %atend, ^empty, ^tok
+^empty:
+  core.check.null %save
+  core.check.uaf %save
+  core.check.oob %save {w=8, access="w", origin="strtok_r *save"}
+  core.store %q, %save {waived="checked above"}
+  %np = core.int_to_ptr %z : ptr
+  core.return %np
+^tok:
+  %len = core.call @strcspn(%q, %delim) : i64
+  core.check.ptr_arith %q, %len
+  %e = core.ptr_add %q, %len : ptr
+  %eb = core.call @__hlir_cbyte(%e, %z) : i64
+  %last = core.icmp eq %eb, %z : bool
+  core.cond_br %last, ^store(%e), ^cut
+^cut:
+  core.check.oob %e {w=1, access="w", origin="strtok_r terminator"}
+  %nul8 = core.const 0 : i8
+  core.store %nul8, %e {waived="checked above"}
+  %one = core.const 1 : i64
+  core.check.ptr_arith %e, %one
+  %nxt = core.ptr_add %e, %one : ptr
+  core.br ^store(%nxt)
+^store(%rest: ptr):
+  core.check.null %save
+  core.check.uaf %save
+  core.check.oob %save {w=8, access="w", origin="strtok_r *save"}
+  core.store %rest, %save {waived="checked above"}
+  core.return %q
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// libdl. These had no model at all until now.
+//
+// MEASURED FIRST, and it corrected the reason for writing them. The expectation was that an unmodelled
+// `dlopen` returns NULL, so the program takes its LOAD-FAILED branch and everything the shared object sets up
+// is unreachable. That is wrong: an opaque external's pointer result is "NULL **or** a zeroed object", a
+// nondet the search can flip, so the success branch was already reachable. On `test/c/scan/dlopenmod.c` the
+// defect behind the dlopen gate is found either way.
+//
+// What the models actually buy, measured on that fixture: `opaque_calls` 3 -> 0 (dlopen/dlsym/dlclose stop
+// being unexplained externals in every report that touches them) and blocks 11 -> 14. Worth having, and a
+// smaller claim than the one this comment used to make.
+//
+// `fail=nondet` rather than "always succeeds": the failure branch is real code (dlerror handling, fallbacks)
+// and is often reachable by an attacker. A nondet lets the search take BOTH, which is why no
+// `dlopen_succeeds` narrowing has to be named. Same reasoning as @malloc.
+//
+// These models stop at the handle, and that is the part that matters for a real target: `dlsym` returns an
+// address no call site can match, so the call through it is `__hlir_unknown_indirect` and the shared object's
+// code stays invisible. Resolving a symbol NAME to the function the scan linked needs the engine, not a model
+// body -- a model cannot read the module's symbol table (DESIGN.md §22.423).
+
+// void *dlopen(const char *file, int mode)
+core.func @dlopen(ptr, i32) -> ptr {
+^entry(%f: ptr, %m: i32):
+  %n = core.const 64 : i64
+  %h = core.heap_alloc %n {fail=nondet, name="dlopen_fail"} : ptr
+  core.return %h
+}
+
+// void *dlsym(void *handle, const char *name) — an opaque, possibly-NULL symbol address. A call through it
+// has no candidate to match, so it becomes __hlir_unknown_indirect and the path continues.
+core.func @dlsym(ptr, ptr) -> ptr {
+^entry(%h: ptr, %n: ptr):
+  %sz = core.const 1 : i64
+  %p = core.heap_alloc %sz {fail=nondet, name="dlsym_fail"} : ptr
+  core.return %p
+}
+
+// int dlclose(void *handle) — 0 on success. The handle is not freed here: a program that keeps using symbols
+// after dlclose is doing something real, and turning it into a use-after-free would be our invention.
+core.func @dlclose(ptr) -> i32 {
+^entry(%h: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// char *dlerror(void) — NULL when there is no error to report, else a message. Both are reachable.
+core.func @dlerror() -> ptr {
+^entry:
+  %sz = core.const 1 : i64
+  %p = core.heap_alloc %sz {fail=nondet, name="dlerror_none"} : ptr
+  core.return %p
+}
+
+// =========================================================================================================
+// POSIX threads. The scanner executes ONE thread, so the synchronisation primitives have no effect on the
+// state an entry reads -- but "no effect" is not the same as "unmodelled": left opaque they return an
+// arbitrary value, and libgit2's `git_mutex_lock(&x) < 0` error paths then become reachable on every call,
+// while pthread_getspecific returns an unconstrained pointer that later gets dereferenced. Measured on
+// libgit2's git_object__from_raw: pthread_mutex_lock/unlock/getspecific were three of the five unexplained
+// externals in the first scan (DESIGN.md Sec.22.489).
+//
+// Each lock returns 0 (success). That IS a narrowing -- EDEADLK, EBUSY and EINVAL paths are not explored --
+// and it is the right one for a single-threaded replay: a lock that fails in a program the scanner runs
+// alone would be a defect of the model, not of the program.
+core.func @pthread_mutex_lock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_mutex_unlock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_mutex_trylock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_mutex_init(ptr, ptr) -> i32 {
+^entry(%m: ptr, %attr: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_mutex_destroy(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_rwlock_rdlock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_rwlock_wrlock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_rwlock_unlock(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_rwlock_init(ptr, ptr) -> i32 {
+^entry(%m: ptr, %attr: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_rwlock_destroy(ptr) -> i32 {
+^entry(%m: ptr):
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// Thread-local storage, modelled for real rather than waved through, because it is STATE a parser reads:
+// libgit2 keeps its error object in TLS (git_error_global_init -> git_tlsdata_init), and an unconstrained
+// pointer out of pthread_getspecific is dereferenced on every git_error_set.
+//
+// One table of 16 slots, keys handed out in order. 16 is a real limit and a wrong answer past it is not
+// acceptable, so key_create returns EAGAIN (11) when they run out and set/getspecific reject a key outside
+// the table -- a program that uses 17 keys gets an honest failure instead of an aliased slot.
+core.func @pthread_key_create(ptr, ptr) -> i32 {
+^entry(%keyp: ptr, %dtor: ptr):
+  %cnt = core.global_addr @__hlir_pthread_nkeys {size=4} : ptr
+  %n = core.load %cnt {waived="object known"} : i32
+  %max = core.const 16 : i32
+  %full = core.icmp uge %n, %max : bool
+  core.cond_br %full, ^oops, ^give
+^oops:
+  %eagain = core.const 11 : i32
+  core.return %eagain
+^give:
+  %one = core.const 1 : i32
+  %nn = core.add %n, %one : i32
+  core.store %nn, %cnt {waived="object known"}
+  core.check.null %keyp
+  core.check.uaf %keyp
+  core.check.oob %keyp {w=4, access="w", origin="pthread_key_create *key"}
+  core.store %n, %keyp {waived="checked above"}
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_setspecific(i32, ptr) -> i32 {
+^entry(%key: i32, %val: ptr):
+  %max = core.const 16 : i32
+  %bad = core.icmp uge %key, %max : bool
+  core.cond_br %bad, ^inval, ^set
+^inval:
+  %einval = core.const 22 : i32
+  core.return %einval
+^set:
+  %tls = core.global_addr @__hlir_pthread_tls {size=128} : ptr
+  %k64 = core.zext %key : i64
+  %eight = core.const 8 : i64
+  %off = core.mul %k64, %eight : i64
+  %slot = core.ptr_add %tls, %off {waived="key < 16 checked above"} : ptr
+  core.store %val, %slot {waived="in-bounds by construction"}
+  %z = core.const 0 : i32
+  core.return %z
+}
+core.func @pthread_getspecific(i32) -> ptr {
+^entry(%key: i32):
+  %max = core.const 16 : i32
+  %bad = core.icmp uge %key, %max : bool
+  core.cond_br %bad, ^none, ^get
+^none:
+  %zz = core.const 0 : i64
+  %np = core.int_to_ptr %zz : ptr
+  core.return %np
+^get:
+  %tls = core.global_addr @__hlir_pthread_tls {size=128} : ptr
+  %k64 = core.zext %key : i64
+  %eight = core.const 8 : i64
+  %off = core.mul %k64, %eight : i64
+  %slot = core.ptr_add %tls, %off {waived="key < 16 checked above"} : ptr
+  %v = core.load %slot {waived="in-bounds by construction"} : ptr
+  core.return %v
+}
+core.func @pthread_key_delete(i32) -> i32 {
+^entry(%key: i32):
+  %max = core.const 16 : i32
+  %bad = core.icmp uge %key, %max : bool
+  core.cond_br %bad, ^inval, ^del
+^inval:
+  %einval = core.const 22 : i32
+  core.return %einval
+^del:
+  %tls = core.global_addr @__hlir_pthread_tls {size=128} : ptr
+  %k64 = core.zext %key : i64
+  %eight = core.const 8 : i64
+  %off = core.mul %k64, %eight : i64
+  %slot = core.ptr_add %tls, %off {waived="key < 16 checked above"} : ptr
+  %zz = core.const 0 : i64
+  %np = core.int_to_ptr %zz : ptr
+  core.store %np, %slot {waived="in-bounds by construction"}
+  %z = core.const 0 : i32
+  core.return %z
+}
+
+// pthread_self / pthread_equal: one thread, so one id. A constant rather than a nondet because a program
+// that compares `pthread_self() == owner` must take the SAME branch every time it asks -- a nondet would
+// let the solver say "a different thread" inside a single run, which cannot happen here.
+core.func @pthread_self() -> i64 {
+^entry:
+  %id = core.const 1 : i64
+  core.return %id
+}
+core.func @pthread_equal(i64, i64) -> i32 {
+^entry(%a: i64, %b: i64):
+  %eq = core.icmp eq %a, %b : bool
+  %r = core.b2i %eq : i32
+  core.return %r
+}
+
+// NOT MODELLED, on purpose: @pthread_once(once_control, init_routine).
+//
+// Its whole semantics is "call this function pointer exactly once", and `core.call` in this IR takes a
+// SYMBOL, not a value -- there is no way to write an indirect call in a model body. The two things a model
+// could do instead are both lies: setting *once to 1 without calling anything claims the initialisation
+// ran, and leaving it alone claims it never will. So it stays opaque, and the correct fix for a library
+// that initialises through pthread_once is the one the init work of Sec.22.488 is about: name the
+// initialiser with `--init-fn`, which runs the real body in the real order.

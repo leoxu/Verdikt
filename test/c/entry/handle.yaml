@@ -1,0 +1,5 @@
+taint_entries:
+  - function: handle
+    label: network
+    params:
+      op: { taint: value, type: int }

@@ -1,0 +1,7 @@
+core.func @attrs(i32) -> i32 {
+^entry(%a: i32):
+  %one = core.const 1 : i32 loc("a.c":3:7)
+  %s = core.add %a, %one {sov, note="x \"y\"", n=-5, k=0x10, off=false} : i32 loc("a.c":3:9)
+  core.check.sadd_ovf %a, %one {ub=signed_overflow, mode=report} loc("a.c":3:9)
+  core.return %s
+}

@@ -1,0 +1,125 @@
+// linked from: test/wp/validate_use.c
+core.func internal @classify(i32) -> i32 {
+^entry(%x: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/validate_use.c":7:12)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/validate_use.c":7:12)
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":7:44)
+  %l1 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":7:44)
+  %c2 = core.const 1 : i32 loc("test/wp/validate_use.c":7:48)
+  %t3 = core.and %l1, %c2 : i32 loc("test/wp/validate_use.c":7:48)
+  %t4 = core.i2b %t3 : bool loc("test/wp/validate_use.c":7:48)
+  core.cond_br %t4, ^then1, ^endif2 loc("test/wp/validate_use.c":7:48)
+^then1:
+  %c5 = core.const -1 : i32 loc("test/wp/validate_use.c":7:58)
+  core.return %c5 loc("test/wp/validate_use.c":7:58)
+^endif2:
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":7:69)
+  %l6 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":7:69)
+  %c7 = core.const 7 : i32 loc("test/wp/validate_use.c":7:73)
+  %t8 = core.and %l6, %c7 : i32 loc("test/wp/validate_use.c":7:73)
+  core.return %t8 loc("test/wp/validate_use.c":7:73)
+}
+core.func internal @classify_wide(i32) -> i32 {
+^entry(%x: i32):
+  %v0 = core.alloca {size=4, align=4, name="x"} : ptr loc("test/wp/validate_use.c":8:12)
+  core.store %x, %v0 {waived="object known"} loc("test/wp/validate_use.c":8:12)
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":8:44)
+  %l1 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":8:44)
+  %c2 = core.const 1 : i32 loc("test/wp/validate_use.c":8:48)
+  %t3 = core.and %l1, %c2 : i32 loc("test/wp/validate_use.c":8:48)
+  %t4 = core.i2b %t3 : bool loc("test/wp/validate_use.c":8:48)
+  core.cond_br %t4, ^then1, ^endif2 loc("test/wp/validate_use.c":8:48)
+^then1:
+  %c5 = core.const -1 : i32 loc("test/wp/validate_use.c":8:58)
+  core.return %c5 loc("test/wp/validate_use.c":8:58)
+^endif2:
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":8:69)
+  %l6 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":8:69)
+  %c7 = core.const 31 : i32 loc("test/wp/validate_use.c":8:73)
+  %t8 = core.and %l6, %c7 : i32 loc("test/wp/validate_use.c":8:73)
+  core.return %t8 loc("test/wp/validate_use.c":8:73)
+}
+core.func @vu_safe(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/validate_use.c":10:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/validate_use.c":10:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/validate_use.c":11:10)
+  %v2 = core.alloca {size=4, align=4, name="c"} : ptr loc("test/wp/validate_use.c":11:22)
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":11:35)
+  %l3 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":11:35)
+  %r4 = core.call @classify(%l3) : i32 loc("test/wp/validate_use.c":11:35)
+  core.store %r4, %v2 {waived="object known"} loc("test/wp/validate_use.c":11:35)
+  core.check.uninit %v2 {w=4} loc("test/wp/validate_use.c":12:9)
+  %l5 = core.load %v2 {waived="object known"} : i32 loc("test/wp/validate_use.c":12:9)
+  %c6 = core.const 0 : i32 loc("test/wp/validate_use.c":12:14)
+  %t7 = core.icmp sge %l5, %c6 : bool loc("test/wp/validate_use.c":12:14)
+  core.cond_br %t7, ^then1, ^endif2 loc("test/wp/validate_use.c":12:14)
+^then1:
+  core.check.uninit %v2 {w=4} loc("test/wp/validate_use.c":12:28)
+  %l8 = core.load %v2 {waived="object known"} : i32 loc("test/wp/validate_use.c":12:28)
+  %t9 = core.sext %l8 : i64 loc("test/wp/validate_use.c":12:28)
+  core.check.ptr_arith %v1, %t9 loc("test/wp/validate_use.c":12:28)
+  %p10 = core.ptr_add %v1, %t9 : ptr loc("test/wp/validate_use.c":12:28)
+  core.check.null %p10 loc("test/wp/validate_use.c":12:28)
+  core.check.uaf %p10 loc("test/wp/validate_use.c":12:28)
+  core.check.oob %p10 {w=1, access="r"} loc("test/wp/validate_use.c":12:28)
+  core.check.uninit %p10 {w=1} loc("test/wp/validate_use.c":12:28)
+  %l11 = core.load %p10 : i8 loc("test/wp/validate_use.c":12:28)
+  core.return %l11 loc("test/wp/validate_use.c":12:28)
+^endif2:
+  %c12 = core.const 0 : i8 loc("test/wp/validate_use.c":13:12)
+  core.return %c12 loc("test/wp/validate_use.c":13:12)
+}
+core.func @vu_noguard(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/validate_use.c":16:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/validate_use.c":16:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/validate_use.c":17:10)
+  %v2 = core.alloca {size=4, align=4, name="c"} : ptr loc("test/wp/validate_use.c":17:22)
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":17:35)
+  %l3 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":17:35)
+  %r4 = core.call @classify(%l3) : i32 loc("test/wp/validate_use.c":17:35)
+  core.store %r4, %v2 {waived="object known"} loc("test/wp/validate_use.c":17:35)
+  core.check.uninit %v2 {w=4} loc("test/wp/validate_use.c":18:16)
+  %l5 = core.load %v2 {waived="object known"} : i32 loc("test/wp/validate_use.c":18:16)
+  %t6 = core.sext %l5 : i64 loc("test/wp/validate_use.c":18:16)
+  core.check.ptr_arith %v1, %t6 loc("test/wp/validate_use.c":18:16)
+  %p7 = core.ptr_add %v1, %t6 : ptr loc("test/wp/validate_use.c":18:16)
+  core.check.null %p7 loc("test/wp/validate_use.c":18:16)
+  core.check.uaf %p7 loc("test/wp/validate_use.c":18:16)
+  core.check.oob %p7 {w=1, access="r"} loc("test/wp/validate_use.c":18:16)
+  core.check.uninit %p7 {w=1} loc("test/wp/validate_use.c":18:16)
+  %l8 = core.load %p7 : i8 loc("test/wp/validate_use.c":18:16)
+  core.return %l8 loc("test/wp/validate_use.c":18:16)
+}
+core.func @vu_toowide(i32) -> i8 {
+^entry(%k: i32):
+  %v0 = core.alloca {size=4, align=4, name="k"} : ptr loc("test/wp/validate_use.c":21:6)
+  core.store %k, %v0 {waived="object known"} loc("test/wp/validate_use.c":21:6)
+  %v1 = core.alloca {size=8, align=1, name="buf"} : ptr loc("test/wp/validate_use.c":22:10)
+  %v2 = core.alloca {size=4, align=4, name="c"} : ptr loc("test/wp/validate_use.c":22:22)
+  core.check.uninit %v0 {w=4} loc("test/wp/validate_use.c":22:40)
+  %l3 = core.load %v0 {waived="object known"} : i32 loc("test/wp/validate_use.c":22:40)
+  %r4 = core.call @classify_wide(%l3) : i32 loc("test/wp/validate_use.c":22:40)
+  core.store %r4, %v2 {waived="object known"} loc("test/wp/validate_use.c":22:40)
+  core.check.uninit %v2 {w=4} loc("test/wp/validate_use.c":23:9)
+  %l5 = core.load %v2 {waived="object known"} : i32 loc("test/wp/validate_use.c":23:9)
+  %c6 = core.const 0 : i32 loc("test/wp/validate_use.c":23:14)
+  %t7 = core.icmp sge %l5, %c6 : bool loc("test/wp/validate_use.c":23:14)
+  core.cond_br %t7, ^then1, ^endif2 loc("test/wp/validate_use.c":23:14)
+^then1:
+  core.check.uninit %v2 {w=4} loc("test/wp/validate_use.c":23:28)
+  %l8 = core.load %v2 {waived="object known"} : i32 loc("test/wp/validate_use.c":23:28)
+  %t9 = core.sext %l8 : i64 loc("test/wp/validate_use.c":23:28)
+  core.check.ptr_arith %v1, %t9 loc("test/wp/validate_use.c":23:28)
+  %p10 = core.ptr_add %v1, %t9 : ptr loc("test/wp/validate_use.c":23:28)
+  core.check.null %p10 loc("test/wp/validate_use.c":23:28)
+  core.check.uaf %p10 loc("test/wp/validate_use.c":23:28)
+  core.check.oob %p10 {w=1, access="r"} loc("test/wp/validate_use.c":23:28)
+  core.check.uninit %p10 {w=1} loc("test/wp/validate_use.c":23:28)
+  %l11 = core.load %p10 : i8 loc("test/wp/validate_use.c":23:28)
+  core.return %l11 loc("test/wp/validate_use.c":23:28)
+^endif2:
+  %c12 = core.const 0 : i8 loc("test/wp/validate_use.c":24:12)
+  core.return %c12 loc("test/wp/validate_use.c":24:12)
+}

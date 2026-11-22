@@ -1,0 +1,6 @@
+// ERROR: redefinition of function
+core.func @f() -> void {
+^entry:
+  core.return
+}
+core.declare @f() -> void

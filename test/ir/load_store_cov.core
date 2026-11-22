@@ -1,0 +1,14 @@
+// FLAGS: coverage
+core.func @rw(ptr, i64) -> i32 {
+^entry(%p: ptr, %off: i64):
+  core.check.ptr_arith %p, %off
+  %q = core.ptr_add %p, %off : ptr
+  core.check.null %q
+  core.check.uaf %q
+  core.check.oob %q {w=4, access="r"}
+  %v = core.load %q {align=4} : i32
+  %one = core.const 1 : i32
+  %w = core.add %v, %one : i32
+  core.store %w, %q {align=4}
+  core.return %w
+}

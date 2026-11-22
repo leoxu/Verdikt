@@ -1,0 +1,14 @@
+# `len` is kernel_owned, so it renders untainted -- a fixed value with nothing for a relation to constrain.
+# The contract still states the size relation, because it is true; the generator has to cope with it.
+version: 1
+interfaces:
+  - interface: tops
+    struct: tops
+    label: untrusted
+    attacker_in_body: true
+    slots:
+      cmp:
+        params:
+          ctxp: { role: kernel_owned }
+          len:  { role: kernel_owned }
+          str:  { role: kernel_owned, size_from: len }

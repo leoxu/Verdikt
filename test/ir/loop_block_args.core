@@ -1,0 +1,15 @@
+core.func @sum_to(i32) -> i32 {
+^entry(%n: i32):
+  %zero = core.const 0 : i32
+  core.br ^head(%zero, %zero)
+^head(%i: i32, %acc: i32):
+  %c = core.icmp slt %i, %n : bool
+  core.cond_br %c, ^body, ^exit(%acc)
+^body:
+  %one = core.const 1 : i32
+  %acc2 = core.add %acc, %i : i32
+  %i2 = core.add %i, %one : i32
+  core.br ^head(%i2, %acc2)
+^exit(%r: i32):
+  core.return %r
+}

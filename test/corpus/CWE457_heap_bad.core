@@ -1,0 +1,10 @@
+// EXPECT: uninit_read
+// ENTRY: f
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %n = core.const 4 : i64
+  %p = core.heap_alloc %n {fail=never} : ptr
+  core.check.uninit %p {w=4}
+  %v = core.load %p : i32
+  core.return %v
+}

@@ -1,0 +1,7 @@
+// ERROR: redefinition of value %x
+core.func @f() -> void {
+^entry:
+  %x = core.const 1 : i32
+  %x = core.const 2 : i32
+  core.return
+}

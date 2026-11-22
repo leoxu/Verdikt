@@ -1,0 +1,12 @@
+core.func @wide(i128, i1) -> i128 {
+^entry(%a: i128, %b: i1):
+  %k = core.const -170141183460469231731687303715884105728 : i128
+  %m = core.const 0xff : i128
+  %s = core.add %a, %k : i128
+  %t = core.and %s, %m : i128
+  %c = core.const 1 : i1
+  %d = core.xor %b, %c : i1
+  %u = core.zext %d : i128
+  %r = core.add %t, %u : i128
+  core.return %r
+}

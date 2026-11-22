@@ -1,0 +1,11 @@
+taint_entries:
+  - function: use
+    label: network
+    params:
+      m:
+        taint: pointee
+        kind: buffer
+        size: { min: 24, max: 24 }
+        fields:
+          - { offset: 8, kind: buffer, taint: pointee, size: { min: 8, max: 8 } }
+          - { offset: 16, kind: buffer, taint: none, size: { min: 8, max: 8 }, fields: [ { offset: 0, kind: funcptr, targets: [h_dbl, h_neg] } ] }

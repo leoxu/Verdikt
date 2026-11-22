@@ -1,0 +1,17 @@
+// EXPECT: use_after_scope
+// ENTRY: f
+core.func @make() -> ptr {
+^entry:
+  %p = core.alloca {size=4, align=4} : ptr
+  %c = core.const 7 : i32
+  core.store %c, %p
+  core.return %p
+}
+core.func @f(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.call @make() : ptr
+  core.check.null %p
+  core.check.uaf %p
+  %v = core.load %p : i32
+  core.return %v
+}

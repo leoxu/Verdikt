@@ -1,0 +1,6 @@
+// ERROR: heap_alloc size must be i64
+core.func @f(i32) -> void {
+^entry(%n: i32):
+  %p = core.heap_alloc %n : ptr
+  core.return
+}

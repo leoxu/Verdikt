@@ -1,0 +1,5 @@
+// ERROR: does not end with a terminator
+core.func @f() -> void {
+^entry:
+  %a = core.const 1 : i32
+}

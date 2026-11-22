@@ -1,0 +1,6 @@
+// ERROR: positive 'size'
+core.func @f() -> void {
+^entry:
+  %a = core.alloca {align=4} : ptr
+  core.return
+}

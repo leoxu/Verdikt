@@ -1,0 +1,6 @@
+// FLAGS: coverage
+core.func @w(ptr) -> i32 {
+^entry(%p: ptr):
+  %v = core.load %p {align=4, waived="callee validates pointer"} : i32
+  core.return %v
+}

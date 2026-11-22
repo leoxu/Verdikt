@@ -1,0 +1,45 @@
+// RUN: @twice(21) => 42
+// RUN: @spin(1) => steplimit
+// RUN: @forever(1) => depthlimit
+// RUN: @ext_call(1) => unsupported
+// RUN: @mem(1) => 1
+core.declare @external(i32) -> i32
+core.func @inc(i32) -> i32 {
+^entry(%x: i32):
+  %one = core.const 1 : i32
+  %r = core.add %x, %one : i32
+  core.return %r
+}
+core.func @twice(i32) -> i32 {
+^entry(%x: i32):
+  %a = core.call @callee_double(%x) : i32
+  core.return %a
+}
+core.func @callee_double(i32) -> i32 {
+^entry(%x: i32):
+  %r = core.add %x, %x : i32
+  core.return %r
+}
+core.func @spin(i32) -> i32 {
+^entry(%x: i32):
+  core.br ^loop
+^loop:
+  core.br ^loop
+}
+core.func @forever(i32) -> i32 {
+^entry(%x: i32):
+  %r = core.call @forever(%x) : i32
+  core.return %r
+}
+core.func @ext_call(i32) -> i32 {
+^entry(%x: i32):
+  %r = core.call @external(%x) : i32
+  core.return %r
+}
+core.func @mem(i32) -> i32 {
+^entry(%x: i32):
+  %p = core.alloca {size=4, align=4} : ptr
+  core.store %x, %p {align=4}
+  %v = core.load %p {align=4} : i32
+  core.return %v
+}

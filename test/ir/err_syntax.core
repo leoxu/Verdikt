@@ -1,0 +1,5 @@
+// ERROR: expected '->'
+core.func @f() void {
+^entry:
+  core.return
+}

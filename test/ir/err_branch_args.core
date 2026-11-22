@@ -1,0 +1,7 @@
+// ERROR: passes 0 argument(s), block expects 1
+core.func @f() -> void {
+^entry:
+  core.br ^b
+^b(%x: i32):
+  core.return
+}

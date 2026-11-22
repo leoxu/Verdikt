@@ -1,0 +1,14 @@
+core.func @v(i32) -> i32 {
+^entry(%a: i32):
+  %x = core.nondet {name="x", taint="network"} : i32
+  %p = core.nondet {name="p"} : ptr
+  %c = core.icmp sle %x, %a : bool
+  core.assume %c
+  %z = core.const 0 : i32
+  %d = core.icmp ne %a, %z : bool
+  core.assert %d {msg="a nonzero"}
+  %sz = core.const 16 : i64
+  core.havoc %p, %sz
+  core.trace %x, %a {event="obs"}
+  core.return %x
+}
